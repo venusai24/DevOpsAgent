@@ -7,6 +7,7 @@ and provides an in-memory LangGraph checkpointer for the graph fixture.
 """
 
 import os
+import sys
 import subprocess
 import time
 from typing import AsyncGenerator
@@ -30,7 +31,7 @@ def mock_enterprise_api():
     
     # Start uvicorn
     process = subprocess.Popen(
-        ["uvicorn", "mock_enterprise.api:app", "--host", "127.0.0.1", "--port", port],
+        [sys.executable, "-m", "uvicorn", "mock_enterprise.api:app", "--host", "127.0.0.1", "--port", port],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )

@@ -42,8 +42,7 @@ _FIXTURES_PATH = Path(__file__).parent / "fixtures.json"
 with _FIXTURES_PATH.open() as _f:
     _FIXTURES: dict[str, Any] = json.load(_f)
 
-_INCIDENT_KEY = "db_connection_exhaustion"
-_INCIDENT = _FIXTURES["incidents"][_INCIDENT_KEY]
+_active_incident_key = "db_connection_exhaustion"
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -60,21 +59,42 @@ _VALID_METRIC_QUERIES = {
 }
 
 
-def _resolve_metric(query: str) -> dict[str, Any] | None:
+def _resolve_metric(query: str):
     """Map a free-form PromQL-style query string to a fixture payload."""
     q = query.lower().strip()
-    if any(kw in q for kw in ("db_conn", "connection", "postgresql")):
-        return _INCIDENT["metrics"]["db_connections"]
-    if any(kw in q for kw in ("error", "http")):
-        return _INCIDENT["metrics"]["error_rate"]
-    if any(kw in q for kw in ("cpu", "compute", "system")):
-        return _INCIDENT["metrics"]["cpu_utilization"]
+    
+    inc = _FIXTURES["incidents"].get(_active_incident_key)
+    if not inc:
+        return None
+        
+    metrics = inc.get("metrics", {})
+    # Direct string matching against seeded metrics
+    for m_key, m_payload in metrics.items():
+        if m_key in q or m_payload["metric"] in q:
+            return m_payload, inc["alert"]["id"]
+    
+    # Legacy keyword mapping for db_connection_exhaustion scenario
+    if inc["alert"]["service"] == "payments-service":
+        if any(kw in q for kw in ("db_conn", "connection", "postgresql")):
+            return metrics.get("db_connections"), inc["alert"]["id"]
+        if any(kw in q for kw in ("error", "http")):
+            return metrics.get("error_rate"), inc["alert"]["id"]
+        if any(kw in q for kw in ("cpu", "compute", "system")):
+            return metrics.get("cpu_utilization"), inc["alert"]["id"]
+            
     return None
 
 
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
+
+@app.post("/active_incident", tags=["Meta"])
+async def set_active_incident(payload: dict) -> dict:
+    global _active_incident_key
+    _active_incident_key = payload.get("incident_key", "db_connection_exhaustion")
+    logger.info("Set active incident key to: %s", _active_incident_key)
+    return {"status": "ok", "active_incident": _active_incident_key}
 
 
 @app.get(
@@ -131,8 +151,8 @@ async def get_metrics(
     """
     logger.info("GET /metrics  query=%r  time_range=%r", query, time_range)
 
-    payload = _resolve_metric(query)
-    if payload is None:
+    resolved = _resolve_metric(query)
+    if resolved is None:
         raise HTTPException(
             status_code=400,
             detail=(
@@ -141,9 +161,11 @@ async def get_metrics(
             ),
         )
 
+    payload, incident_id = resolved
+    
     response_body = {
         "status": "success",
-        "incident_id": _INCIDENT["alert"]["id"],
+        "incident_id": incident_id,
         "query": query,
         "time_range": time_range,
         "metric": payload,
@@ -201,18 +223,28 @@ async def get_logs(
         "GET /logs  service=%r  time_range=%r  level=%r", service, time_range, level
     )
 
-    # Only payments-service is seeded; return 404 for everything else so the
-    # LLM is forced to correct its parameter and retry.
-    if service.lower() not in ("payments-service", "payments_service"):
+    logs = []
+    incident_id = "unknown"
+    inc = _FIXTURES["incidents"].get(_active_incident_key)
+    if inc and inc["alert"]["service"].lower() == service.lower().replace("_", "-"):
+        logs = inc["logs"]
+        incident_id = inc["alert"]["id"]
+    else:
+        for i_val in _FIXTURES["incidents"].values():
+            if i_val["alert"]["service"].lower() == service.lower().replace("_", "-"):
+                logs = i_val["logs"]
+                incident_id = i_val["alert"]["id"]
+                break
+
+    if not logs:
+        available = [i_val["alert"]["service"] for i_val in _FIXTURES["incidents"].values()]
         raise HTTPException(
             status_code=404,
             detail=(
                 f"No log fixtures found for service: {service!r}. "
-                "Available services: ['payments-service']."
+                f"Available services: {available}."
             ),
         )
-
-    logs: list[dict[str, Any]] = _INCIDENT["logs"]
 
     # Optional server-side level filter.
     if level:
@@ -220,7 +252,7 @@ async def get_logs(
 
     response_body = {
         "status": "success",
-        "incident_id": _INCIDENT["alert"]["id"],
+        "incident_id": incident_id,
         "service": service,
         "time_range": time_range,
         "total_entries": len(logs),
@@ -246,4 +278,5 @@ async def get_alert() -> JSONResponse:
     Returns the seeded PagerDuty-style alert that triggered the current
     incident scenario. Useful for bootstrapping the agent's initial context.
     """
-    return JSONResponse(content=_INCIDENT["alert"])
+    incident = list(_FIXTURES["incidents"].values())[0]
+    return JSONResponse(content=incident["alert"])

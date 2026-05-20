@@ -312,6 +312,12 @@ class GraphState(dict):
     Capped at 3 by conditional routing to prevent infinite tool loops.
     """
 
+    extracted_evidence: str
+    """
+    The XML scratchpad containing verbatim metrics and error codes extracted
+    from the raw telemetry by the extract_node. Passed to the RCA plan_node.
+    """
+
     # ------------------------------------------------------------------ #
     #  RCA & Remediation outputs                                           #
     # ------------------------------------------------------------------ #
@@ -370,6 +376,7 @@ def make_initial_state(raw_alert: dict) -> dict:
         "triage_result": None,
         "telemetry": "",
         "retry_count": 0,
+        "extracted_evidence": "",
         "plan": "",
         "remediation_plan": None,
         "is_approved": False,

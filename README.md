@@ -7,7 +7,7 @@
 
 ## Overview
 
-**AIRS** is a stateful, multi-agent AI system designed to handle the heavy lifting of incident response. It ingests alerts, investigates telemetry (metrics/logs), synthesizes a root cause hypothesis, proposes a remediation plan, enforces a durable human-in-the-loop (HITL) pause, and safely executes fixes upon approval.
+**AIRS** is a stateful, multi-agent AI system designed to handle the heavy lifting of incident response. It ingests alerts, investigates telemetry (metrics/logs), extracts verbatim identifiers into an XML scratchpad (mitigating LLM hallucination), synthesizes a root cause hypothesis, proposes a remediation plan, enforces a durable human-in-the-loop (HITL) pause, and safely executes fixes upon approval.
 
 AIRS can run in two modes:
 1. **Mock CLI Mode**: A lightweight, terminal-based simulation using mocked endpoints. Perfect for testing and demonstrating agent logic.
@@ -26,7 +26,7 @@ To explore the agent's logic without external dependencies, use the CLI demo mod
 ### Setup
 ```bash
 # Clone the repository and navigate into the directory
-git clone https://github.com/yourorg/airs.git
+git clone https://github.com/venusai24/airs.git
 cd airs
 
 # Create and activate a virtual environment (e.g., using conda)

@@ -9,8 +9,9 @@ AIRS acts as a highly skilled Level-1 / Level-2 virtual SRE. It does not replace
 When an alert triggers (e.g. from PagerDuty), AIRS:
 1. **Triages**: Extracts service names and assigns an internal Severity (P0-P3).
 2. **Investigates**: Fetches live telemetry (Datadog metrics, AWS CloudWatch logs) recursively until it isolates the fault.
-3. **Drafts a Plan**: Synthesizes a root cause and proposes actionable `kubectl` or shell steps, along with a `rollback_command`.
-4. **Pauses for Human Approval**: Blocks execution and pings the configured Slack channel. **This is where you come in.**
+3. **Extracts Evidence**: Distills the raw telemetry into an XML scratchpad of strict verbatim metrics and log traces to prevent LLM hallucinations.
+4. **Drafts a Plan**: Synthesizes the extracted evidence to formulate a root cause and proposes actionable `kubectl` or shell steps, along with a `rollback_command`.
+5. **Pauses for Human Approval**: Blocks execution and pings the configured Slack channel. **This is where you come in.**
 
 ### Your Role
 As an operator, your primary interaction with AIRS is in the **Approval Node**. When you see a Slack Block Kit message from AIRS, review the Root Cause and the Proposed Remediation Steps. 

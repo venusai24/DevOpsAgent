@@ -127,6 +127,357 @@
           "trace_id": "0000000000000001"
         }
       ]
+    },
+    "kubernetes_oom_killed": {
+      "alert": {
+        "id": "PD-20240520-1045",
+        "title": "CRITICAL: Pod OOMKilled — auth-service",
+        "service": "auth-service",
+        "severity": "P1",
+        "triggered_at": "2024-05-20T10:45:11Z",
+        "source": "Datadog",
+        "description": "auth-service pod has been evicted by Kubelet due to OOM. Memory utilization at 99%. Error rate is rising."
+      },
+      "metrics": {
+        "memory_utilization": {
+          "metric": "kubernetes.memory.usage",
+          "service": "auth-service",
+          "time_range": "last_15m",
+          "data_points": [
+            { "timestamp": "2024-05-20T10:30:00Z", "value": 45, "unit": "percent" },
+            { "timestamp": "2024-05-20T10:35:00Z", "value": 65, "unit": "percent" },
+            { "timestamp": "2024-05-20T10:40:00Z", "value": 85, "unit": "percent" },
+            { "timestamp": "2024-05-20T10:45:00Z", "value": 99, "unit": "percent" }
+          ],
+          "current": 99,
+          "anomaly_detected": true
+        },
+        "cpu_utilization": {
+          "metric": "kubernetes.cpu.usage",
+          "service": "auth-service",
+          "time_range": "last_15m",
+          "data_points": [
+            { "timestamp": "2024-05-20T10:30:00Z", "value": 30, "unit": "percent" },
+            { "timestamp": "2024-05-20T10:45:00Z", "value": 32, "unit": "percent" }
+          ],
+          "current": 32,
+          "anomaly_detected": false,
+          "note": "CPU nominal."
+        }
+      },
+      "logs": [
+        {
+          "timestamp": "2024-05-20T10:44:50Z",
+          "level": "ERROR",
+          "service": "auth-service",
+          "pod": "auth-service-5d6c7b-a1b2c",
+          "message": "java.lang.OutOfMemoryError: Java heap space"
+        },
+        {
+          "timestamp": "2024-05-20T10:45:01Z",
+          "level": "CRITICAL",
+          "service": "kubelet",
+          "pod": "auth-service-5d6c7b-a1b2c",
+          "message": "Pod the-node evicting pod auth-service-5d6c7b-a1b2c. Reason: OOMKilled. Exit code 137."
+        }
+      ]
+    },
+    "dns_resolution_failure": {
+      "alert": {
+        "id": "PD-20240520-2055",
+        "title": "CRITICAL: Downstream API connection failure — inventory-service",
+        "service": "inventory-service",
+        "severity": "P1",
+        "triggered_at": "2024-05-20T20:55:00Z",
+        "source": "Opsgenie",
+        "description": "inventory-service is failing to reach upstream inventory providers."
+      },
+      "metrics": {
+        "error_rate": {
+          "metric": "http.requests.error_rate",
+          "service": "inventory-service",
+          "time_range": "last_15m",
+          "data_points": [
+            { "timestamp": "2024-05-20T20:50:00Z", "value": 0.5, "unit": "percent" },
+            { "timestamp": "2024-05-20T20:55:00Z", "value": 85.0, "unit": "percent" }
+          ],
+          "current": 85.0,
+          "threshold": 5.0,
+          "anomaly_detected": true
+        },
+        "dns_latency": {
+          "metric": "dns.lookup_latency",
+          "service": "inventory-service",
+          "time_range": "last_15m",
+          "data_points": [
+            { "timestamp": "2024-05-20T20:50:00Z", "value": 15, "unit": "ms" },
+            { "timestamp": "2024-05-20T20:55:00Z", "value": 5005, "unit": "ms" }
+          ],
+          "current": 5005,
+          "anomaly_detected": true
+        }
+      },
+      "logs": [
+        {
+          "timestamp": "2024-05-20T20:54:30Z",
+          "level": "WARN",
+          "service": "inventory-service",
+          "pod": "inventory-service-9f8e7d-xyz12",
+          "message": "CoreDNS rate limiting / timeout resolving api.external-vendor.com"
+        },
+        {
+          "timestamp": "2024-05-20T20:55:02Z",
+          "level": "ERROR",
+          "service": "inventory-service",
+          "pod": "inventory-service-9f8e7d-xyz12",
+          "message": "socket.gaierror: [Errno -3] Temporary failure in name resolution for api.external-vendor.com"
+        }
+      ]
+    },
+    "redis_oom_eviction": {
+      "alert": {
+        "id": "PD-20260520-1001",
+        "title": "High 500 Error Rate on User Profile API",
+        "service": "user-profile-service",
+        "severity": "P1",
+        "triggered_at": "2026-05-20T19:15:00Z",
+        "source": "Datadog",
+        "description": "The user-profile-service is experiencing a spike in HTTP 500 errors, correlating with downstream cache failures."
+      },
+      "metrics": {
+        "redis_memory": {
+          "metric": "redis.mem.used",
+          "service": "redis-user-cache",
+          "time_range": "last_15m",
+          "data_points": [
+            { "timestamp": "2026-05-20T19:10:00Z", "value": 85.5, "unit": "percent" },
+            { "timestamp": "2026-05-20T19:12:00Z", "value": 94.2, "unit": "percent" },
+            { "timestamp": "2026-05-20T19:14:00Z", "value": 99.8, "unit": "percent" },
+            { "timestamp": "2026-05-20T19:15:00Z", "value": 100.0, "unit": "percent" }
+          ],
+          "current": 100.0,
+          "anomaly_detected": true
+        }
+      },
+      "logs": [
+        {
+          "timestamp": "2026-05-20T19:14:55Z",
+          "level": "WARN",
+          "service": "redis-user-cache",
+          "pod": "redis-cache-statefulset-0",
+          "message": "WARNING: maxmemory limit reached, eviction policy volatile-lru triggered."
+        },
+        {
+          "timestamp": "2026-05-20T19:15:02Z",
+          "level": "ERROR",
+          "service": "user-profile-service",
+          "pod": "user-profile-api-7b89f6d4d-xj9kz",
+          "message": "RedisException: OOM command not allowed when used memory > 'maxmemory'. Stack trace: at redis.clients.jedis.Protocol.processError(Protocol.java:132)"
+        },
+        {
+          "timestamp": "2026-05-20T19:15:03Z",
+          "level": "ERROR",
+          "service": "user-profile-service",
+          "pod": "user-profile-api-7b89f6d4d-xj9kz",
+          "message": "HTTP 500 Internal Server Error: Unable to fetch user session from cache. Failing fast."
+        }
+      ]
+    },
+    "disk_space_exhaustion": {
+      "alert": {
+        "id": "PD-20260520-1002",
+        "title": "API Node Local Storage Full - Write Failures",
+        "service": "order-processing-api",
+        "severity": "P0",
+        "triggered_at": "2026-05-20T19:20:00Z",
+        "source": "PagerDuty",
+        "description": "Order processing API nodes are failing health checks and rejecting incoming write payloads."
+      },
+      "metrics": {
+        "disk_utilization": {
+          "metric": "system.disk.in_use",
+          "service": "order-processing-api",
+          "time_range": "last_15m",
+          "data_points": [
+            { "timestamp": "2026-05-20T19:15:00Z", "value": 92.0, "unit": "percent" },
+            { "timestamp": "2026-05-20T19:17:00Z", "value": 96.5, "unit": "percent" },
+            { "timestamp": "2026-05-20T19:19:00Z", "value": 99.9, "unit": "percent" },
+            { "timestamp": "2026-05-20T19:20:00Z", "value": 100.0, "unit": "percent" }
+          ],
+          "current": 100.0,
+          "anomaly_detected": true
+        }
+      },
+      "logs": [
+        {
+          "timestamp": "2026-05-20T19:19:45Z",
+          "level": "WARN",
+          "service": "order-processing-api",
+          "pod": "order-api-node-abc12-87x2",
+          "message": "Filesystem threshold critical: /var/log/app partition at 99% usage."
+        },
+        {
+          "timestamp": "2026-05-20T19:20:05Z",
+          "level": "CRITICAL",
+          "service": "order-processing-api",
+          "pod": "order-api-node-abc12-87x2",
+          "message": "java.io.IOException: No space left on device. Failed to flush transaction write-ahead log to disk."
+        },
+        {
+          "timestamp": "2026-05-20T19:20:10Z",
+          "level": "ERROR",
+          "service": "order-processing-api",
+          "pod": "order-api-node-abc12-87x2",
+          "message": "Healthcheck failed. Readiness probe returned HTTP 503 Service Unavailable: Cannot acquire write lock on local spool directory."
+        }
+      ]
+    },
+    "slow_database_query": {
+      "alert": {
+        "id": "PD-20260520-1003",
+        "title": "Elevated Database CPU and Query Timeouts",
+        "service": "inventory-db",
+        "severity": "P1",
+        "triggered_at": "2026-05-20T19:25:00Z",
+        "source": "Datadog",
+        "description": "PostgreSQL primary is experiencing sustained 99% CPU utilization causing cascading transaction timeouts in the inventory service."
+      },
+      "metrics": {
+        "db_cpu": {
+          "metric": "postgresql.cpu.usage",
+          "service": "inventory-db",
+          "time_range": "last_15m",
+          "data_points": [
+            { "timestamp": "2026-05-20T19:20:00Z", "value": 45.0, "unit": "percent" },
+            { "timestamp": "2026-05-20T19:22:00Z", "value": 68.0, "unit": "percent" },
+            { "timestamp": "2026-05-20T19:24:00Z", "value": 98.5, "unit": "percent" },
+            { "timestamp": "2026-05-20T19:25:00Z", "value": 99.9, "unit": "percent" }
+          ],
+          "current": 99.9,
+          "anomaly_detected": true
+        }
+      },
+      "logs": [
+        {
+          "timestamp": "2026-05-20T19:24:10Z",
+          "level": "WARN",
+          "service": "inventory-db",
+          "pod": "inventory-postgres-primary",
+          "message": "duration: 5432.12 ms  statement: SELECT * FROM inventory_records WHERE supplier_id = 'S-992' AND status = 'ACTIVE' /* No index hit, triggering sequential scan */"
+        },
+        {
+          "timestamp": "2026-05-20T19:24:55Z",
+          "level": "ERROR",
+          "service": "inventory-service",
+          "pod": "inventory-service-67fb8c9-2k9ll",
+          "message": "SQLException: canceling statement due to statement timeout. Query exceeded max execution time of 5000ms."
+        },
+        {
+          "timestamp": "2026-05-20T19:25:05Z",
+          "level": "CRITICAL",
+          "service": "inventory-db",
+          "pod": "inventory-postgres-primary",
+          "message": "FATAL: remaining connection slots are reserved for non-replication superuser connections. Max connections (1000) reached."
+        }
+      ]
+    },
+    "tls_certificate_expiration": {
+      "alert": {
+        "id": "PD-20260520-1004",
+        "title": "Payment Gateway SSL Handshake Failures",
+        "service": "api-gateway",
+        "severity": "P0",
+        "triggered_at": "2026-05-20T19:30:00Z",
+        "source": "Opsgenie",
+        "description": "Sudden drop to 0% success rate for internal routing to the secure payment processing cluster."
+      },
+      "metrics": {
+        "ssl_handshake_errors": {
+          "metric": "envoy.cluster.ssl.handshake.errors",
+          "service": "api-gateway",
+          "time_range": "last_15m",
+          "data_points": [
+            { "timestamp": "2026-05-20T19:25:00Z", "value": 0, "unit": "count/sec" },
+            { "timestamp": "2026-05-20T19:28:00Z", "value": 0, "unit": "count/sec" },
+            { "timestamp": "2026-05-20T19:29:00Z", "value": 245, "unit": "count/sec" },
+            { "timestamp": "2026-05-20T19:30:00Z", "value": 412, "unit": "count/sec" }
+          ],
+          "current": 412,
+          "anomaly_detected": true
+        }
+      },
+      "logs": [
+        {
+          "timestamp": "2026-05-20T19:29:01Z",
+          "level": "ERROR",
+          "service": "api-gateway",
+          "pod": "ingress-envoy-controller-c84df",
+          "message": "upstream connect error or disconnect/reset before headers. reset reason: connection failure, transport failure reason: TLS error: 268435581:SSL routines:OPENSSL_internal:CERTIFICATE_VERIFY_FAILED"
+        },
+        {
+          "timestamp": "2026-05-20T19:29:05Z",
+          "level": "CRITICAL",
+          "service": "payment-service",
+          "pod": "payment-processor-983hf-j82x",
+          "message": "javax.net.ssl.SSLHandshakeException: PKIX path validation failed: java.security.cert.CertPathValidatorException: validity check failed"
+        },
+        {
+          "timestamp": "2026-05-20T19:29:06Z",
+          "level": "ERROR",
+          "service": "payment-service",
+          "pod": "payment-processor-983hf-j82x",
+          "message": "Caused by: java.security.cert.CertificateExpiredException: NotAfter: Wed May 20 19:29:00 UTC 2026"
+        }
+      ]
+    },
+    "upstream_rate_limiting": {
+      "alert": {
+        "id": "PD-20260520-1005",
+        "title": "Auth Service Degradation / Upstream API Rejections",
+        "service": "authentication-service",
+        "severity": "P2",
+        "triggered_at": "2026-05-20T19:35:00Z",
+        "source": "Datadog",
+        "description": "Authentication service is experiencing severe latency and request queue build-up due to failing upstream calls to third-party SSO provider."
+      },
+      "metrics": {
+        "upstream_429s": {
+          "metric": "http.client.responses.429",
+          "service": "authentication-service",
+          "time_range": "last_15m",
+          "data_points": [
+            { "timestamp": "2026-05-20T19:30:00Z", "value": 0, "unit": "count/sec" },
+            { "timestamp": "2026-05-20T19:32:00Z", "value": 15, "unit": "count/sec" },
+            { "timestamp": "2026-05-20T19:34:00Z", "value": 180, "unit": "count/sec" },
+            { "timestamp": "2026-05-20T19:35:00Z", "value": 350, "unit": "count/sec" }
+          ],
+          "current": 350,
+          "anomaly_detected": true
+        }
+      },
+      "logs": [
+        {
+          "timestamp": "2026-05-20T19:33:15Z",
+          "level": "WARN",
+          "service": "authentication-service",
+          "pod": "auth-svc-deployment-64d88fc44-zzp8",
+          "message": "HTTP 429 Too Many Requests received from upstream https://api.thirdparty-sso.com/v1/verify. Retry-After header: 60s"
+        },
+        {
+          "timestamp": "2026-05-20T19:34:05Z",
+          "level": "ERROR",
+          "service": "authentication-service",
+          "pod": "auth-svc-deployment-64d88fc44-zzp8",
+          "message": "Exhausted maximum retries (3) for upstream call to SSO provider. Circuit breaker opened."
+        },
+        {
+          "timestamp": "2026-05-20T19:34:50Z",
+          "level": "CRITICAL",
+          "service": "authentication-service",
+          "pod": "auth-svc-deployment-64d88fc44-zzp8",
+          "message": "Thread pool exhausted: Request queue size reached maximum capacity (5000). Rejecting new incoming login requests."
+        }
+      ]
     }
   }
 }

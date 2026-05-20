@@ -29,6 +29,7 @@ from langchain_groq import ChatGroq
 
 from agent.state import GraphState, RemediationPlan, RemediationStep, TriageResult
 from agent.tools import ALL_TOOLS, get_logs, get_metrics
+from agent.json_parser import parse_json_robust
 
 logger = logging.getLogger(__name__)
 
@@ -81,8 +82,18 @@ Severity guidelines:
   P2 — Minor degradation, error rate < 5%, no SLA risk.
   P3 — Informational alert, no user impact.
 
-Respond ONLY with the structured output schema. Do not add prose outside it.
+Respond ONLY with a JSON object. Do not add any prose, markdown, or text outside the JSON.
 """
+
+# Friendly JSON template for triage output — avoids triggering Qwen tool-call
+# wrapping that occurs when formal JSON schemas are injected into the prompt.
+_TRIAGE_JSON_TEMPLATE = """\
+{
+  "severity": "<P0 | P1 | P2 | P3>",
+  "service": "<canonical microservice name from the alert>",
+  "confidence": <float between 0.0 and 1.0>,
+  "reasoning": "<one sentence citing specific evidence from the alert>"
+}"""
 
 
 async def triage_node(state: dict) -> dict:
@@ -103,17 +114,24 @@ async def triage_node(state: dict) -> dict:
         "[triage_node] Classifying alert id=%s", raw_alert.get("id", "unknown")
     )
 
-    # Structured output: Gemini is constrained to emit a valid TriageResult JSON
-    llm = _make_llm().with_structured_output(TriageResult)
+    # Bind JSON mode — do NOT inject a formal JSON schema; Qwen treats
+    # formal schemas as function/tool definitions and wraps its response
+    # in a tool-call envelope, causing Groq to return 400 tool_use_failed.
+    # A plain template string is sufficient and avoids this failure mode.
+    llm = _make_llm().bind(response_format={"type": "json_object"})
 
     human_msg = HumanMessage(
         content=(
             f"{_TRIAGE_PROMPT}\n\n"
-            f"## Alert Payload\n```json\n{json.dumps(raw_alert, indent=2)}\n```"
+            f"## Alert Payload\n```json\n{json.dumps(raw_alert, indent=2)}\n```\n\n"
+            f"Respond ONLY with a JSON object matching this exact template:\n"
+            f"```\n{_TRIAGE_JSON_TEMPLATE}\n```"
         )
     )
 
-    result: TriageResult = await llm.ainvoke([human_msg])
+    response = await llm.ainvoke([human_msg])
+    data = parse_json_robust(response.content)
+    result = TriageResult.model_validate(data)
 
     # Log low-confidence classifications for observability
     if result.confidence < 0.6:
@@ -160,12 +178,14 @@ incident:
 
 ## Investigation Objective
 Use the available tools to gather enough telemetry to hand off a complete
-picture to the RCA agent. Follow this strategy:
+picture to the RCA agent. Follow this strategy based strictly on the alert symptoms:
 
-1. Call `get_metrics` with query="db_connections" to assess database pool health.
-2. Call `get_metrics` with query="error_rate" to quantify user-facing impact.
-3. Call `get_logs` with service="{service}" to find specific error messages and
-   transaction IDs that pinpoint the root cause.
+1. Call `get_metrics` with queries relevant ONLY to the symptoms of this specific alert:
+   - If the alert mentions database connection pool, DB queries, postgresql, database exhaustion, or query timeouts: query "db_connections".
+   - If the alert mentions OOM, OOMKilled, Memory usage, Java heap space, node eviction, or exit code 137: query "memory_utilization" or "cpu_utilization". Do NOT query database connections.
+   - If the alert mentions DNS resolution, name resolution failures, CoreDNS, external routing, or upstream API failures: query "dns_latency" or "error_rate". Do NOT query database connections.
+   
+2. Call `get_logs` with service="{service}" to inspect actual error traces, warning messages, and exceptions from the affected service.
 
 ## Telemetry Gathered So Far
 {telemetry_so_far}
@@ -368,6 +388,57 @@ def should_continue_investigation(state: dict) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Node: extract_node
+# ---------------------------------------------------------------------------
+
+_EXTRACT_PROMPT_TEMPLATE = """\
+You are an expert systems diagnostician. Your ONLY job is to extract exact verbatim strings from the provided Telemetry Evidence. Do NOT invent, paraphrase, or summarize anything.
+
+## Telemetry Evidence
+{telemetry}
+
+## Task
+1. Sequential Scan: Read the telemetry chronologically.
+2. Metric Isolation: Extract the exact values of any anomalous metrics (e.g. "99%", "100 active connections", "312s").
+3. Error Isolation: Extract the exact error strings, exception names, and exit codes (e.g. "java.lang.OutOfMemoryError", "Exit code 137", "CoreDNS rate limiting").
+
+Respond ONLY with an XML block containing your raw extracted findings. Use this exact format:
+<extracted_evidence>
+[Your verbatim quotes here]
+</extracted_evidence>
+"""
+
+async def extract_node(state: dict) -> dict:
+    """
+    Step 1 of the Extract-Then-Generate pipeline.
+    Reads the raw telemetry string and explicitly isolates key metrics and errors
+    into an XML scratchpad. This mitigates attention hijacking and ensures verbatim
+    retention of critical identifiers (like exit codes or WARN logs).
+    """
+    telemetry: str = state.get("telemetry", "No telemetry gathered.")
+    logger.info("[extract_node] Extracting key evidence from telemetry")
+
+    llm = _make_llm()  # Standard text output, no JSON mode needed
+    
+    prompt = _EXTRACT_PROMPT_TEMPLATE.format(telemetry=telemetry)
+    human_msg = HumanMessage(content=prompt)
+
+    response = await llm.ainvoke([human_msg])
+    
+    extracted_text = response.content
+    # Simple extraction of the XML block if present
+    if "<extracted_evidence>" in extracted_text:
+        extracted_text = extracted_text.split("<extracted_evidence>")[1].split("</extracted_evidence>")[0].strip()
+
+    ai_msg = AIMessage(content=f"Extracted evidence:\n{extracted_text}")
+
+    # We store the extracted text back into the state for the plan_node to use
+    return {
+        "extracted_evidence": extracted_text,
+        "messages": [human_msg, ai_msg],
+    }
+
+# ---------------------------------------------------------------------------
 # Node: plan_node
 # ---------------------------------------------------------------------------
 
@@ -379,42 +450,57 @@ You are a senior SRE architect drafting an incident remediation plan.
 - **Severity**: {severity}
 - **Alert**: {alert_title}
 
-## Telemetry Evidence
-{telemetry}
+## Extracted Verbatim Evidence
+{extracted_evidence}
 
 ## Task
-Based on the telemetry evidence above, produce a precise, actionable
-RemediationPlan. Follow these rules strictly:
+Produce a precise, actionable remediation plan as a JSON object based on the Extracted Verbatim Evidence above.
 
-1. `root_cause` must be a single paragraph citing SPECIFIC metric values and
-   log lines from the telemetry (e.g. "connection pool at 100/100",
-   "tx-8f3a9d open for 312s").
-
-2. `steps` must be an ordered list of atomic actions. Each step must have:
+1. `root_cause` — A single paragraph citing the exact metrics, log messages, and exit codes from the Extracted Verbatim Evidence. Identify the underlying root cause. You MUST construct this paragraph using the exact phrases provided in the evidence block above.
+2. `steps` — Ordered list of atomic remediation actions. Each step must include:
    - `order`: integer starting at 1
    - `action`: human-readable description
-   - `command`: the exact kubectl / psql / shell command (if applicable)
+   - `command`: exact kubectl / shell command (use null if not applicable)
    - `risk`: one of "low", "medium", "high"
 
-3. `rollback_command` MUST be a single command that fully reverts all changes.
-   An empty rollback_command will block automated execution — always provide one.
+3. `rollback_command` — A single shell/kubectl command that fully reverts all
+   changes. MUST NOT be empty.
 
-4. `estimated_mttr_minutes`: your best estimate of time-to-recovery.
+4. `estimated_mttr_minutes` — Your best estimate of time-to-recovery in minutes.
 
-5. `postmortem_summary`: one paragraph suitable for a postmortem document.
+5. `postmortem_summary` — One paragraph suitable for a postmortem document.
 
-Respond ONLY with the structured output schema. Do not add prose outside it.
+Respond ONLY with a JSON object. Do not add any prose or text outside the JSON.
 """
+
+# Friendly JSON template for remediation plan output — avoids triggering Qwen
+# tool-call wrapping that occurs when formal Pydantic JSON schemas are injected.
+_PLAN_JSON_TEMPLATE = """\
+{
+  "root_cause": "<single paragraph citing exact metric values and log lines from the telemetry above>",
+  "steps": [
+    {
+      "order": 1,
+      "action": "<human-readable action>",
+      "command": "<exact kubectl or shell command, or null>",
+      "risk": "<low | medium | high>"
+    }
+  ],
+  "rollback_command": "<single command to fully revert all changes>",
+  "estimated_mttr_minutes": <integer>,
+  "postmortem_summary": "<one paragraph for the postmortem document>"
+}"""
 
 
 async def plan_node(state: dict) -> dict:
     """
     Synthesise all gathered telemetry into a typed RemediationPlan.
 
-    Uses with_structured_output(RemediationPlan) to guarantee the LLM output
-    is a valid, parseable Pydantic model. If structured output fails (e.g.
-    the LLM produces malformed JSON), the exception propagates to LangGraph's
-    error handling, which will surface it as a node error in LangSmith.
+    Uses native JSON mode (`bind(response_format={"type": "json_object"})`) and
+    a friendly template string rather than a formal Pydantic JSON schema. This
+    avoids Groq 400 tool_use_failed errors that occur when Qwen-32b interprets
+    a formal schema as a function/tool definition and wraps its output in a
+    tool-call envelope.
 
     The zero-trust guardrail (RemediationPlan.is_high_risk) is evaluated
     here. High-risk plans are logged but not blocked at this stage; blocking
@@ -434,21 +520,25 @@ async def plan_node(state: dict) -> dict:
     service: str = triage.service if triage else state.get("raw_alert", {}).get("service", "unknown")
     severity: str = state.get("severity", "P1")
     alert_title: str = state.get("raw_alert", {}).get("title", "Unknown incident")
-    telemetry: str = state.get("telemetry", "No telemetry gathered.")
+    extracted_evidence: str = state.get("extracted_evidence", "No evidence extracted.")
 
     logger.info("[plan_node] Drafting remediation plan for service=%s", service)
 
-    llm = _make_llm().with_structured_output(RemediationPlan)
+    # Bind JSON mode — do NOT inject a formal JSON schema; Qwen treats formal
+    # schemas as function definitions and wraps responses in a tool-call
+    # envelope, causing Groq to return 400 tool_use_failed.
+    llm = _make_llm().bind(response_format={"type": "json_object"})
 
-    prompt = _PLAN_PROMPT_TEMPLATE.format(
-        service=service,
-        severity=severity,
-        alert_title=alert_title,
-        telemetry=telemetry,
+    prompt = (
+        f"{_PLAN_PROMPT_TEMPLATE.format(service=service, severity=severity, alert_title=alert_title, extracted_evidence=extracted_evidence)}\n\n"
+        f"Respond ONLY with a JSON object matching this exact template:\n"
+        f"```\n{_PLAN_JSON_TEMPLATE}\n```"
     )
     human_msg = HumanMessage(content=prompt)
 
-    plan: RemediationPlan = await llm.ainvoke([human_msg])
+    response = await llm.ainvoke([human_msg])
+    data = parse_json_robust(response.content)
+    plan = RemediationPlan.model_validate(data)
 
     # Zero-trust guardrail evaluation
     if plan.is_high_risk:

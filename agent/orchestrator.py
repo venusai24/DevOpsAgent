@@ -60,7 +60,12 @@ from typing import AsyncIterator
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
-from langgraph.checkpoint.postgres.aio import PostgresSaver
+try:
+    from langgraph.checkpoint.postgres.aio import PostgresSaver
+    HAS_POSTGRES = True
+except ImportError:
+    HAS_POSTGRES = False
+    PostgresSaver = None
 from langgraph.config import var_child_runnable_config
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, interrupt
@@ -72,6 +77,7 @@ from agent.security.guardrails import is_safe_command
 from agent.nodes import (
     MAX_RETRIES,
     investigate_node,
+    extract_node,
     plan_node,
     should_continue_investigation,
     triage_node,
@@ -448,6 +454,11 @@ async def build_graph() -> AsyncIterator:
         The graph will pick up from the exact checkpoint where it left off.
     """
     if settings.DATABASE_URL:
+        if not HAS_POSTGRES:
+            raise ImportError(
+                "DATABASE_URL is configured, but 'langgraph-checkpoint-postgres' is not installed. "
+                "Please run: pip install -U \"langgraph-checkpoint-postgres[psycopg]\""
+            )
         # Use Postgres checkpointer if DB URL is configured
         async with PostgresSaver.from_conn_string(settings.DATABASE_URL) as checkpointer:
             await checkpointer.setup()
@@ -503,6 +514,7 @@ def _build_compiled_graph(checkpointer: AsyncSqliteSaver):
     graph.add_node("triage", triage_node)
     graph.add_node("escalate", escalate_node)
     graph.add_node("investigate", investigate_node)
+    graph.add_node("extract", extract_node)
     graph.add_node("plan", plan_node)
     graph.add_node("approval", approval_node)
     graph.add_node("execute", execute_node)
@@ -534,9 +546,12 @@ def _build_compiled_graph(checkpointer: AsyncSqliteSaver):
         should_continue_investigation,
         {
             "investigate": "investigate",   # loop back
-            "plan": "plan",                  # exit loop
+            "plan": "extract",               # exit loop to extract node
         },
     )
+
+    # After extract: sequential flow into plan
+    graph.add_edge("extract", "plan")
 
     # After plan: zero-trust guardrail check
     graph.add_conditional_edges(

@@ -11,7 +11,8 @@ The core architecture operates on a unified TypedDict State object defined in `a
 2. **`escalate_node`**: A zero-trust fast-path. If triage identifies a `P0` incident, execution routes here *before* any tool calls, emitting high-priority alerts to the conversation stream.
 3. **`investigate_node`**: A ReAct (Reason + Act) loop. The agent is bound to tools (`get_metrics`, `get_logs`) and accumulates telemetry in the state. 
     - **Circuit Breaker**: A conditional edge checks `retry_count`. If iterations exceed `MAX_RETRIES` (3), the router forces the graph out of the loop to prevent runaway LLM spend.
-4. **`plan_node`**: Synthesizes the telemetry into a highly typed `RemediationPlan` Pydantic model. Evaluates guardrails (e.g., checks if a rollback command was provided).
+4. **`extract_node`**: Step 1 of the "Extract-Then-Generate" pipeline. Uses task decomposition and an XML scratchpad (`<extracted_evidence>`) to isolate exact verbatim metrics, error codes, and identifiers from the raw telemetry, mitigating LLM attention bias and hallucination.
+5. **`plan_node`**: Step 2 of the "Extract-Then-Generate" pipeline. Synthesizes the XML scratchpad into a highly typed `RemediationPlan` Pydantic model via structured JSON. Evaluates guardrails (e.g., checks if a rollback command was provided).
 5. **`approval_node`**: Uses LangGraph's native `interrupt()` primitive. This halts the graph execution entirely and pushes the payload to the external interface (CLI or Slack). Execution remains suspended indefinitely until a `Command(resume=...)` is received.
 6. **`execute_node`**: Triggers actual cluster modification using the Kubernetes SDK and compiles the final `postmortem.md`.
 
