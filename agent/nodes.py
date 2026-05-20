@@ -1,0 +1,520 @@
+"""
+agent/nodes.py
+
+Pure Python LangGraph node functions for the AIRS graph.
+
+Design rules (ImplementationPlan.md Section 5 & 6):
+  - Every node is a plain async function: (state: dict) -> dict.
+  - Nodes return ONLY the state keys they modify.
+  - All LLM calls use with_structured_output() for type-safe parsing.
+  - The investigation node is a ReAct loop capped by retry_count <= MAX_RETRIES.
+  - No system prompts for safety; destructive-operation guardrails are in
+    deterministic Python code (RemediationPlan.is_high_risk).
+
+Node catalogue:
+  triage_node       — Classify severity (P0-P3) and extract the service name.
+  investigate_node  — ReAct loop: call get_metrics / get_logs, append telemetry.
+  plan_node         — Synthesise telemetry into a typed RemediationPlan.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+from typing import Any
+
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_groq import ChatGroq
+
+from agent.state import GraphState, RemediationPlan, RemediationStep, TriageResult
+from agent.tools import ALL_TOOLS, get_logs, get_metrics
+
+logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
+MAX_RETRIES: int = 3
+"""
+Hard cap on investigation loop iterations.
+When retry_count reaches this value the router sends the graph directly
+to plan_node regardless of whether the LLM has finished calling tools.
+Prevents runaway API spend when the LLM is stuck in a tool loop.
+"""
+
+_MODEL_NAME: str = os.getenv("GROQ_MODEL", "qwen/qwen3-32b")
+
+# ---------------------------------------------------------------------------
+# LLM factory
+# ---------------------------------------------------------------------------
+
+
+def _make_llm(**kwargs: Any) -> ChatGroq:
+    """Instantiate a Groq Qwen LLM using the GROQ_API_KEY env var."""
+    return ChatGroq(
+        model=_MODEL_NAME,
+        temperature=0,      # Deterministic outputs for structured extraction
+        max_retries=5,      # Resiliency against rate limits
+        **kwargs,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Node: triage_node
+# ---------------------------------------------------------------------------
+
+_TRIAGE_PROMPT = """\
+You are a senior Site Reliability Engineer performing initial incident triage.
+
+You will receive a raw PagerDuty-style alert payload. Your ONLY job is to:
+1. Assign a severity level (P0, P1, P2, or P3) based on the alert description
+   and any available metadata.
+2. Identify the canonical name of the affected microservice.
+3. Assign a confidence score (0.0–1.0) for your severity classification.
+4. Write a single-sentence reasoning that cites specific evidence from the alert.
+
+Severity guidelines:
+  P0 — Active customer-facing outage, error rate > 20%, or data loss risk.
+  P1 — Major degradation, error rate 5–20%, or SLA breach imminent.
+  P2 — Minor degradation, error rate < 5%, no SLA risk.
+  P3 — Informational alert, no user impact.
+
+Respond ONLY with the structured output schema. Do not add prose outside it.
+"""
+
+
+async def triage_node(state: dict) -> dict:
+    """
+    Classify the incoming alert into a severity level and extract the
+    affected service name.
+
+    Reads:
+        state["raw_alert"] — PagerDuty-style alert dict.
+
+    Writes:
+        state["severity"]      — P-level string, e.g. "P0".
+        state["triage_result"] — Full TriageResult Pydantic instance.
+        state["messages"]      — Appends HumanMessage (input) + AIMessage.
+    """
+    raw_alert: dict = state.get("raw_alert", {})
+    logger.info(
+        "[triage_node] Classifying alert id=%s", raw_alert.get("id", "unknown")
+    )
+
+    # Structured output: Gemini is constrained to emit a valid TriageResult JSON
+    llm = _make_llm().with_structured_output(TriageResult)
+
+    human_msg = HumanMessage(
+        content=(
+            f"{_TRIAGE_PROMPT}\n\n"
+            f"## Alert Payload\n```json\n{json.dumps(raw_alert, indent=2)}\n```"
+        )
+    )
+
+    result: TriageResult = await llm.ainvoke([human_msg])
+
+    # Log low-confidence classifications for observability
+    if result.confidence < 0.6:
+        logger.warning(
+            "[triage_node] Low-confidence classification: severity=%s confidence=%.2f",
+            result.severity,
+            result.confidence,
+        )
+
+    ai_msg = AIMessage(
+        content=(
+            f"Triage complete. Severity: **{result.severity}** "
+            f"| Service: **{result.service}** "
+            f"| Confidence: {result.confidence:.0%}\n"
+            f"Reasoning: {result.reasoning}"
+        )
+    )
+
+    logger.info(
+        "[triage_node] severity=%s service=%s confidence=%.2f",
+        result.severity,
+        result.service,
+        result.confidence,
+    )
+
+    return {
+        "severity": result.severity,
+        "triage_result": result,
+        "messages": [human_msg, ai_msg],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Node: investigate_node
+# ---------------------------------------------------------------------------
+
+_INVESTIGATE_PROMPT_TEMPLATE = """\
+You are an SRE investigator performing root cause analysis for the following
+incident:
+
+  Service  : {service}
+  Severity : {severity}
+  Alert    : {alert_title}
+
+## Investigation Objective
+Use the available tools to gather enough telemetry to hand off a complete
+picture to the RCA agent. Follow this strategy:
+
+1. Call `get_metrics` with query="db_connections" to assess database pool health.
+2. Call `get_metrics` with query="error_rate" to quantify user-facing impact.
+3. Call `get_logs` with service="{service}" to find specific error messages and
+   transaction IDs that pinpoint the root cause.
+
+## Telemetry Gathered So Far
+{telemetry_so_far}
+
+## Instructions
+- Make ONE tool call per response.
+- After each tool result is appended, decide whether you need more data.
+- When you have sufficient evidence, respond with ONLY the text:
+  INVESTIGATION_COMPLETE
+  Do NOT add any other text after INVESTIGATION_COMPLETE.
+- You have at most {remaining_retries} tool call(s) remaining before the system
+  forces you to conclude. Use them wisely.
+"""
+
+
+async def investigate_node(state: dict) -> dict:
+    """
+    ReAct-style investigation loop: calls get_metrics and get_logs tools,
+    accumulates results into state["telemetry"], and increments retry_count.
+
+    The loop runs for a SINGLE tool-call round per invocation. The graph
+    router calls this node repeatedly until either:
+      a) The LLM signals INVESTIGATION_COMPLETE.
+      b) retry_count reaches MAX_RETRIES (hard cap enforced by router).
+
+    This single-step-per-invocation design is idiomatic LangGraph: the
+    router, not the node, controls looping. It also means every tool-call
+    round is checkpointed individually, enabling crash-safe resumption.
+
+    Reads:
+        state["triage_result"] — For service name.
+        state["raw_alert"]     — For alert title.
+        state["severity"]      — For prompt context.
+        state["telemetry"]     — Accumulated telemetry string (may be empty).
+        state["retry_count"]   — Current iteration count.
+        state["messages"]      — Full message history.
+
+    Writes:
+        state["telemetry"]   — Appended with new tool output (if a tool ran).
+        state["retry_count"] — Incremented by 1.
+        state["messages"]    — Appended with AI + ToolMessage (if tool ran),
+                               or the INVESTIGATION_COMPLETE AIMessage.
+    """
+    triage: TriageResult | None = state.get("triage_result")
+    service: str = triage.service if triage else state.get("raw_alert", {}).get("service", "unknown")
+    severity: str = state.get("severity", "P1")
+    alert_title: str = state.get("raw_alert", {}).get("title", "Unknown incident")
+    telemetry_so_far: str = state.get("telemetry", "")
+    retry_count: int = state.get("retry_count", 0)
+    remaining = MAX_RETRIES - retry_count
+
+    logger.info(
+        "[investigate_node] iteration=%d/%d service=%s",
+        retry_count + 1, MAX_RETRIES, service,
+    )
+
+    # ---------------------------------------------------------------
+    # Build the prompt for this investigation round
+    # ---------------------------------------------------------------
+    prompt = _INVESTIGATE_PROMPT_TEMPLATE.format(
+        service=service,
+        severity=severity,
+        alert_title=alert_title,
+        telemetry_so_far=telemetry_so_far if telemetry_so_far else "(none yet)",
+        remaining_retries=remaining,
+    )
+
+    # Prepend the structured prompt as the first human message for this round.
+    # We pass the full message history so the LLM sees all previous tool calls.
+    prior_messages = state.get("messages", [])
+    round_messages = [HumanMessage(content=prompt)] + prior_messages
+
+    # ---------------------------------------------------------------
+    # Invoke LLM with tools bound
+    # ---------------------------------------------------------------
+    llm = _make_llm()
+    llm_with_tools = llm.bind_tools(ALL_TOOLS)
+
+    ai_response: AIMessage = await llm_with_tools.ainvoke(round_messages)
+
+    new_messages: list = [ai_response]
+    new_telemetry: str = telemetry_so_far
+    new_retry_count: int = retry_count + 1
+
+    # ---------------------------------------------------------------
+    # Case A: LLM wants to call a tool
+    # ---------------------------------------------------------------
+    if ai_response.tool_calls:
+        tool_call = ai_response.tool_calls[0]  # Process one call per round
+        tool_name: str = tool_call["name"]
+        tool_args: dict = tool_call["args"]
+        tool_call_id: str = tool_call["id"]
+
+        logger.info(
+            "[investigate_node] tool_call name=%s args=%s", tool_name, tool_args
+        )
+
+        # Dispatch the tool call
+        try:
+            if tool_name == "get_metrics":
+                tool_result: str = await get_metrics.ainvoke(tool_args)
+            elif tool_name == "get_logs":
+                tool_result = await get_logs.ainvoke(tool_args)
+            else:
+                tool_result = f"Unknown tool: {tool_name}"
+        except Exception as exc:  # ToolException or unexpected errors
+            tool_result = f"[TOOL ERROR] {tool_name}: {exc}"
+            logger.warning("[investigate_node] Tool error: %s", exc)
+
+        # Append the tool result as a ToolMessage so the LLM can read it
+        tool_msg = ToolMessage(
+            content=tool_result,
+            tool_call_id=tool_call_id,
+            name=tool_name,
+        )
+        new_messages.append(tool_msg)
+
+        # Accumulate telemetry: each round appends its section header + result
+        section_header = (
+            f"\n\n---\n### Round {new_retry_count} — `{tool_name}`"
+            f"({', '.join(f'{k}={v!r}' for k, v in tool_args.items())})\n"
+        )
+        new_telemetry = new_telemetry + section_header + tool_result
+
+        logger.info(
+            "[investigate_node] telemetry length=%d chars", len(new_telemetry)
+        )
+
+    # ---------------------------------------------------------------
+    # Case B: LLM signals investigation is complete (no tool call)
+    # ---------------------------------------------------------------
+    else:
+        response_text: str = ai_response.content or ""
+        if "INVESTIGATION_COMPLETE" in response_text:
+            logger.info("[investigate_node] LLM signalled INVESTIGATION_COMPLETE")
+        else:
+            # LLM gave a free-form response without a tool call — treat it as
+            # an implicit completion (the router will check retry_count).
+            logger.warning(
+                "[investigate_node] No tool call and no INVESTIGATION_COMPLETE. "
+                "Response: %s",
+                response_text[:200],
+            )
+
+    return {
+        "telemetry": new_telemetry,
+        "retry_count": new_retry_count,
+        "messages": new_messages,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Router: should_continue_investigation
+# ---------------------------------------------------------------------------
+
+
+def should_continue_investigation(state: dict) -> str:
+    """
+    Conditional edge function for the investigation loop.
+
+    Returns "investigate" to loop back, or "plan" to proceed to plan_node.
+
+    Rules (both must be False to proceed to plan):
+      1. retry_count < MAX_RETRIES  →  keep investigating.
+      2. Last AIMessage contains no tool_calls AND no INVESTIGATION_COMPLETE
+         signal  →  still loop (LLM may need another prompt).
+
+    Hard cap: once retry_count >= MAX_RETRIES, always proceed regardless of
+    LLM intent. This is the runaway-spend circuit breaker.
+    """
+    retry_count: int = state.get("retry_count", 0)
+
+    # Hard cap: always exit if at or over limit
+    if retry_count >= MAX_RETRIES:
+        logger.info(
+            "[router] retry_count=%d >= MAX_RETRIES=%d → routing to plan_node",
+            retry_count, MAX_RETRIES,
+        )
+        return "plan"
+
+    # Check last AI message for a tool call or completion signal
+    messages = state.get("messages", [])
+    last_ai = next(
+        (m for m in reversed(messages) if isinstance(m, AIMessage)), None
+    )
+
+    if last_ai is None:
+        return "investigate"
+
+    # If the LLM made a tool call in the last round, loop back
+    if last_ai.tool_calls:
+        return "investigate"
+
+    # If the LLM signalled completion, proceed
+    if "INVESTIGATION_COMPLETE" in (last_ai.content or ""):
+        return "plan"
+
+    # Fallback: continue investigating
+    return "investigate"
+
+
+# ---------------------------------------------------------------------------
+# Node: plan_node
+# ---------------------------------------------------------------------------
+
+_PLAN_PROMPT_TEMPLATE = """\
+You are a senior SRE architect drafting an incident remediation plan.
+
+## Incident Context
+- **Service**: {service}
+- **Severity**: {severity}
+- **Alert**: {alert_title}
+
+## Telemetry Evidence
+{telemetry}
+
+## Task
+Based on the telemetry evidence above, produce a precise, actionable
+RemediationPlan. Follow these rules strictly:
+
+1. `root_cause` must be a single paragraph citing SPECIFIC metric values and
+   log lines from the telemetry (e.g. "connection pool at 100/100",
+   "tx-8f3a9d open for 312s").
+
+2. `steps` must be an ordered list of atomic actions. Each step must have:
+   - `order`: integer starting at 1
+   - `action`: human-readable description
+   - `command`: the exact kubectl / psql / shell command (if applicable)
+   - `risk`: one of "low", "medium", "high"
+
+3. `rollback_command` MUST be a single command that fully reverts all changes.
+   An empty rollback_command will block automated execution — always provide one.
+
+4. `estimated_mttr_minutes`: your best estimate of time-to-recovery.
+
+5. `postmortem_summary`: one paragraph suitable for a postmortem document.
+
+Respond ONLY with the structured output schema. Do not add prose outside it.
+"""
+
+
+async def plan_node(state: dict) -> dict:
+    """
+    Synthesise all gathered telemetry into a typed RemediationPlan.
+
+    Uses with_structured_output(RemediationPlan) to guarantee the LLM output
+    is a valid, parseable Pydantic model. If structured output fails (e.g.
+    the LLM produces malformed JSON), the exception propagates to LangGraph's
+    error handling, which will surface it as a node error in LangSmith.
+
+    The zero-trust guardrail (RemediationPlan.is_high_risk) is evaluated
+    here. High-risk plans are logged but not blocked at this stage; blocking
+    occurs in the orchestrator's conditional edge before the approval node.
+
+    Reads:
+        state["triage_result"] — For service / severity.
+        state["raw_alert"]     — For alert title.
+        state["telemetry"]     — Full investigation telemetry string.
+
+    Writes:
+        state["plan"]             — Markdown-serialised plan for CLI / Rich.
+        state["remediation_plan"] — Typed RemediationPlan Pydantic instance.
+        state["messages"]         — Appends HumanMessage (input) + AIMessage.
+    """
+    triage: TriageResult | None = state.get("triage_result")
+    service: str = triage.service if triage else state.get("raw_alert", {}).get("service", "unknown")
+    severity: str = state.get("severity", "P1")
+    alert_title: str = state.get("raw_alert", {}).get("title", "Unknown incident")
+    telemetry: str = state.get("telemetry", "No telemetry gathered.")
+
+    logger.info("[plan_node] Drafting remediation plan for service=%s", service)
+
+    llm = _make_llm().with_structured_output(RemediationPlan)
+
+    prompt = _PLAN_PROMPT_TEMPLATE.format(
+        service=service,
+        severity=severity,
+        alert_title=alert_title,
+        telemetry=telemetry,
+    )
+    human_msg = HumanMessage(content=prompt)
+
+    plan: RemediationPlan = await llm.ainvoke([human_msg])
+
+    # Zero-trust guardrail evaluation
+    if plan.is_high_risk:
+        logger.warning(
+            "[plan_node] HIGH-RISK plan generated: rollback_command is empty. "
+            "Automated execution will be blocked."
+        )
+    else:
+        logger.info(
+            "[plan_node] Plan generated with rollback_command=%r",
+            plan.rollback_command[:60],
+        )
+
+    # Serialise to markdown for the Rich CLI renderer and approval node
+    plan_md = _render_plan_markdown(plan, service, severity)
+
+    ai_msg = AIMessage(content=f"Remediation plan drafted.\n\n{plan_md}")
+
+    return {
+        "plan": plan_md,
+        "remediation_plan": plan,
+        "messages": [human_msg, ai_msg],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Private rendering helper
+# ---------------------------------------------------------------------------
+
+
+def _render_plan_markdown(
+    plan: RemediationPlan, service: str, severity: str
+) -> str:
+    """
+    Convert a RemediationPlan into a Rich-renderable markdown string.
+    This is the exact string surfaced to the operator at the HITL pause.
+    """
+    risk_icon = "🔴" if plan.is_high_risk else "🟢"
+    lines = [
+        f"# Remediation Plan — {service} ({severity})",
+        "",
+        f"**Risk status**: {risk_icon} {'HIGH-RISK (no rollback)' if plan.is_high_risk else 'Standard (rollback available)'}",
+        "",
+        "## Root Cause",
+        plan.root_cause,
+        "",
+        "## Remediation Steps",
+    ]
+
+    for step in sorted(plan.steps, key=lambda s: s.order):
+        risk_badge = {"low": "🟢", "medium": "🟡", "high": "🔴"}.get(step.risk, "⚪")
+        lines.append(f"\n### Step {step.order}: {step.action} {risk_badge}")
+        if step.command:
+            lines.append(f"```bash\n{step.command}\n```")
+
+    lines += [
+        "",
+        "## Rollback Command",
+        f"```bash\n{plan.rollback_command or '# ⚠ No rollback command provided'}\n```",
+        "",
+    ]
+
+    if plan.estimated_mttr_minutes:
+        lines.append(f"**Estimated MTTR**: {plan.estimated_mttr_minutes} minutes")
+
+    if plan.postmortem_summary:
+        lines += ["", "## Postmortem Summary (draft)", plan.postmortem_summary]
+
+    return "\n".join(lines)

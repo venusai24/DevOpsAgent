@@ -1,0 +1,132 @@
+{
+  "incidents": {
+    "db_connection_exhaustion": {
+      "alert": {
+        "id": "PD-20240519-0042",
+        "title": "CRITICAL: Database connection pool exhausted — payments-service",
+        "service": "payments-service",
+        "severity": "P0",
+        "triggered_at": "2024-05-19T14:23:11Z",
+        "source": "PagerDuty",
+        "description": "Connection pool for payments-db has reached 100% utilization. New requests are queuing and timing out. Error rate has spiked to 47%."
+      },
+      "metrics": {
+        "db_connections": {
+          "metric": "postgresql.connections.active",
+          "service": "payments-service",
+          "time_range": "last_15m",
+          "data_points": [
+            { "timestamp": "2024-05-19T14:08:00Z", "value": 45, "unit": "connections" },
+            { "timestamp": "2024-05-19T14:10:00Z", "value": 67, "unit": "connections" },
+            { "timestamp": "2024-05-19T14:12:00Z", "value": 89, "unit": "connections" },
+            { "timestamp": "2024-05-19T14:14:00Z", "value": 98, "unit": "connections" },
+            { "timestamp": "2024-05-19T14:16:00Z", "value": 100, "unit": "connections" },
+            { "timestamp": "2024-05-19T14:18:00Z", "value": 100, "unit": "connections" },
+            { "timestamp": "2024-05-19T14:20:00Z", "value": 100, "unit": "connections" },
+            { "timestamp": "2024-05-19T14:22:00Z", "value": 100, "unit": "connections" }
+          ],
+          "pool_max": 100,
+          "pool_current": 100,
+          "pool_waiting": 37,
+          "anomaly_detected": true,
+          "anomaly_start": "2024-05-19T14:15:00Z"
+        },
+        "error_rate": {
+          "metric": "http.requests.error_rate",
+          "service": "payments-service",
+          "time_range": "last_15m",
+          "data_points": [
+            { "timestamp": "2024-05-19T14:08:00Z", "value": 0.3, "unit": "percent" },
+            { "timestamp": "2024-05-19T14:10:00Z", "value": 1.2, "unit": "percent" },
+            { "timestamp": "2024-05-19T14:12:00Z", "value": 8.7, "unit": "percent" },
+            { "timestamp": "2024-05-19T14:15:00Z", "value": 23.4, "unit": "percent" },
+            { "timestamp": "2024-05-19T14:18:00Z", "value": 41.9, "unit": "percent" },
+            { "timestamp": "2024-05-19T14:22:00Z", "value": 47.2, "unit": "percent" }
+          ],
+          "current": 47.2,
+          "threshold": 5.0,
+          "anomaly_detected": true
+        },
+        "cpu_utilization": {
+          "metric": "system.cpu.utilization",
+          "service": "payments-service",
+          "time_range": "last_15m",
+          "data_points": [
+            { "timestamp": "2024-05-19T14:08:00Z", "value": 34.1, "unit": "percent" },
+            { "timestamp": "2024-05-19T14:12:00Z", "value": 36.8, "unit": "percent" },
+            { "timestamp": "2024-05-19T14:16:00Z", "value": 35.2, "unit": "percent" },
+            { "timestamp": "2024-05-19T14:20:00Z", "value": 33.9, "unit": "percent" }
+          ],
+          "current": 33.9,
+          "anomaly_detected": false,
+          "note": "CPU is nominal — ruling out compute-side bottleneck."
+        }
+      },
+      "logs": [
+        {
+          "timestamp": "2024-05-19T14:14:58Z",
+          "level": "WARN",
+          "service": "payments-service",
+          "pod": "payments-service-7d4f9c-xk2pq",
+          "message": "Connection pool utilization at 89%. Consider scaling connection limit.",
+          "trace_id": "4bf92f3577b34da6"
+        },
+        {
+          "timestamp": "2024-05-19T14:15:22Z",
+          "level": "ERROR",
+          "service": "payments-service",
+          "pod": "payments-service-7d4f9c-xk2pq",
+          "message": "TimeoutError: Connection pool exhausted. All 100 connections are in use. Request queued for 5001ms.",
+          "trace_id": "4bf92f3577b34da6",
+          "exception": "sqlalchemy.exc.TimeoutError: QueuePool limit of size 100 overflow 10 reached, connection timed out, timeout 5"
+        },
+        {
+          "timestamp": "2024-05-19T14:15:35Z",
+          "level": "ERROR",
+          "service": "payments-service",
+          "pod": "payments-service-7d4f9c-mb3rs",
+          "message": "TimeoutError: Connection pool exhausted. All 100 connections are in use. Request queued for 5001ms.",
+          "trace_id": "a1b2c3d4e5f67890",
+          "exception": "sqlalchemy.exc.TimeoutError: QueuePool limit of size 100 overflow 10 reached, connection timed out, timeout 5"
+        },
+        {
+          "timestamp": "2024-05-19T14:16:01Z",
+          "level": "ERROR",
+          "service": "payments-service",
+          "pod": "payments-service-7d4f9c-xk2pq",
+          "message": "HTTP 503 returned to client. Downstream payment gateway call aborted.",
+          "trace_id": "4bf92f3577b34da6",
+          "http_status": 503
+        },
+        {
+          "timestamp": "2024-05-19T14:18:44Z",
+          "level": "CRITICAL",
+          "service": "payments-service",
+          "pod": "payments-service-7d4f9c-xk2pq",
+          "message": "Repeated TimeoutError: 37 requests currently waiting for a DB connection. SLA breach imminent.",
+          "trace_id": "deadbeef12345678",
+          "waiting_requests": 37,
+          "exception": "sqlalchemy.exc.TimeoutError: QueuePool limit of size 100 overflow 10 reached, connection timed out, timeout 5"
+        },
+        {
+          "timestamp": "2024-05-19T14:20:11Z",
+          "level": "ERROR",
+          "service": "payments-service",
+          "pod": "payments-service-7d4f9c-mb3rs",
+          "message": "Long-running transaction detected. Transaction ID tx-8f3a9d open for 312 seconds. Possible connection leak.",
+          "trace_id": "cafebabe87654321",
+          "transaction_id": "tx-8f3a9d",
+          "duration_seconds": 312
+        },
+        {
+          "timestamp": "2024-05-19T14:22:05Z",
+          "level": "CRITICAL",
+          "service": "payments-service",
+          "pod": "payments-service-7d4f9c-xk2pq",
+          "message": "Database health check failed. Halting new payment transactions.",
+          "trace_id": "0000000000000001"
+        }
+      ]
+    }
+  }
+}
