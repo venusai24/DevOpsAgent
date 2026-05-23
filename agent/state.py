@@ -21,7 +21,7 @@ Three concerns are handled here:
 
 from __future__ import annotations
 
-from typing import Annotated, Literal
+from typing import Annotated, Literal, Any, Optional
 
 from langgraph.graph.message import add_messages
 from langchain_core.messages import AnyMessage
@@ -239,6 +239,82 @@ class RemediationPlan(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Phase 2-5: New models for Hybrid Memory Architecture
+# ---------------------------------------------------------------------------
+
+
+class CausalNode(BaseModel):
+    """
+    A node in the sparse symbolic causal graph built by the logic_agent_node.
+    Represents a single service/component as a root cause candidate.
+    """
+    service: str = Field(..., description="Service or component name.")
+    evidence: list[str] = Field(
+        default_factory=list,
+        description="Verbatim log/metric citations that implicate this node.",
+    )
+    is_root_cause: bool = Field(
+        default=False,
+        description="True if symbolic inference confirms this as the root cause.",
+    )
+    confidence: float = Field(
+        default=0.0, ge=0.0, le=1.0,
+        description="Confidence in root cause attribution (0.0\u20131.0).",
+    )
+    pruned_reason: str = Field(
+        default="",
+        description="If pruned, the reason (e.g., 'CPU nominal \u2014 cannot be root cause').",
+    )
+
+
+class BlastRadiusResult(BaseModel):
+    """Serializable blast radius report stored in GraphState."""
+    target_service: str
+    affected_services: list[str] = Field(default_factory=list)
+    tier1_services: list[str] = Field(default_factory=list)
+    tier1_impact: bool = False
+    risk_score: float = 0.0
+    recommendation: str = "require_approval"  # auto_execute | require_approval | block
+    on_call_contacts: list[str] = Field(default_factory=list)
+    estimated_user_impact_pct: float = 0.0
+    report_markdown: str = ""
+
+
+class CBRMatch(BaseModel):
+    """A single Case-Based Reasoning match result stored in GraphState."""
+    incident_id: str
+    service: str
+    root_cause_category: str
+    similarity_score: float
+    mttr_minutes: int
+    outcome: str
+    postmortem_summary: str
+
+
+class PolicyResult(BaseModel):
+    """Policy-as-Code check result stored in GraphState."""
+    passed: bool
+    critical_violations: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    terraform_valid: bool = True
+    terraform_errors: list[str] = Field(default_factory=list)
+    result_markdown: str = ""
+
+
+class CanaryStatus(BaseModel):
+    """Progressive canary deployment status stored in GraphState."""
+    service: str
+    succeeded: bool = False
+    stages_completed: int = 0
+    halted_at_stage: Optional[int] = None
+    total_duration_seconds: float = 0.0
+    final_error_rate_pct: float = 0.0
+    final_latency_p99_ms: float = 0.0
+    rollback_executed: bool = False
+    report_markdown: str = ""
+
+
+# ---------------------------------------------------------------------------
 # LangGraph State
 # ---------------------------------------------------------------------------
 
@@ -348,6 +424,114 @@ class GraphState(dict):
     successful remediation. Written to disk by the CLI as a .md file.
     """
 
+    # ------------------------------------------------------------------ #
+    #  Phase 1: Enterprise Knowledge Graph outputs                         #
+    # ------------------------------------------------------------------ #
+    topology_map: dict
+    """
+    Serialized SubGraph extracted by the topology_agent_node.
+    Contains the dependency chain and health status of all services
+    in the blast radius of the failing service.
+    """
+
+    ekg_service_context: str
+    """
+    Markdown-formatted EKG context summary injected into agent prompts.
+    Pre-rendered by the topology_agent_node for LLM consumption.
+    """
+
+    # ------------------------------------------------------------------ #
+    #  Phase 2: Case-Based Reasoning outputs                               #
+    # ------------------------------------------------------------------ #
+    cbr_matches: list
+    """
+    Ranked list of CBRMatch dicts from the diagnostic_agent_node.
+    Populated by the CBR engine's retrieve() phase.
+    """
+
+    cbr_confidence: float
+    """
+    Cosine similarity score of the best CBR match (0.0\u20131.0).
+    High confidence (\u22650.8) means the system uses the CBR plan directly.
+    """
+
+    precedent_incident_id: str
+    """
+    ID of the historical case used as the primary CBR precedent.
+    Included in the postmortem for auditability.
+    """
+
+    # ------------------------------------------------------------------ #
+    #  Phase 3: Perception Layer outputs                                   #
+    # ------------------------------------------------------------------ #
+    perception_stats: dict
+    """
+    L1/L2/L3 tier hit statistics from the TieredLogClassifier.
+    Structure: {L1_hits: int, L2_hits: int, L3_hits: int, primary_template: str}
+    """
+
+    primary_log_template: str
+    """
+    The dominant log pattern category identified by the perception layer.
+    e.g., 'connection_pool_exhausted', 'oom_killed', 'dns_resolution_failure'.
+    Used by the logic_agent_node for symbolic hypothesis pruning.
+    """
+
+    # ------------------------------------------------------------------ #
+    #  Phase 4: Multi-agent reasoning outputs                              #
+    # ------------------------------------------------------------------ #
+    causal_graph_nodes: list
+    """
+    Serialized list of CausalNode dicts from the logic_agent_node.
+    Represents the sparse causal graph after symbolic pruning.
+    """
+
+    confirmed_root_cause: str
+    """
+    The deterministically confirmed root cause category after logic_agent
+    symbolic pruning (e.g., 'connection_pool_exhaustion').
+    Empty string if logic agent could not deterministically confirm.
+    """
+
+    root_cause_hypotheses: list
+    """
+    Ranked list of root cause hypothesis dicts from the diagnostic_agent_node.
+    Each dict: {category: str, confidence: float, evidence: list[str]}
+    """
+
+    # ------------------------------------------------------------------ #
+    #  Phase 5: Safe execution outputs                                     #
+    # ------------------------------------------------------------------ #
+    blast_radius_result: dict
+    """
+    Serialized BlastRadiusResult dict from the risk_agent_node.
+    Determines whether execution requires human approval.
+    """
+
+    policy_check_result: dict
+    """
+    Serialized PolicyResult dict from the policy_check_node.
+    If passed=False, the plan is deterministically blocked.
+    """
+
+    execution_strategy: str
+    """
+    Determined by the blast radius + policy check.
+    One of: 'canary' | 'direct' | 'blocked' | 'require_approval'
+    """
+
+    canary_status: dict
+    """
+    Serialized CanaryStatus dict from the canary_execute_node.
+    Tracks per-stage golden signal observations.
+    """
+
+    rollback_triggered: bool
+    """
+    True if the rollback controller triggered an automatic rollback
+    during or after canary execution.
+    """
+
 
 # ---------------------------------------------------------------------------
 # Default state factory
@@ -381,4 +565,24 @@ def make_initial_state(raw_alert: dict) -> dict:
         "remediation_plan": None,
         "is_approved": False,
         "postmortem": "",
+        # Phase 1: EKG
+        "topology_map": {},
+        "ekg_service_context": "",
+        # Phase 2: CBR
+        "cbr_matches": [],
+        "cbr_confidence": 0.0,
+        "precedent_incident_id": "",
+        # Phase 3: Perception
+        "perception_stats": {},
+        "primary_log_template": "",
+        # Phase 4: Multi-agent reasoning
+        "causal_graph_nodes": [],
+        "confirmed_root_cause": "",
+        "root_cause_hypotheses": [],
+        # Phase 5: Safe execution
+        "blast_radius_result": {},
+        "policy_check_result": {},
+        "execution_strategy": "require_approval",
+        "canary_status": {},
+        "rollback_triggered": False,
     }

@@ -1,0 +1,200 @@
+{
+  "services": [
+    {
+      "name": "api-gateway",
+      "type": "service",
+      "tier": 1,
+      "namespace": "prod",
+      "replicas": 3,
+      "health_status": "healthy",
+      "owner": "platform-team",
+      "on_call": "alice@company.com",
+      "depends_on": ["payments-service", "auth-service", "inventory-service", "user-profile-service"]
+    },
+    {
+      "name": "payments-service",
+      "type": "service",
+      "tier": 1,
+      "namespace": "prod",
+      "replicas": 3,
+      "health_status": "degraded",
+      "owner": "payments-team",
+      "on_call": "alice@company.com",
+      "depends_on": ["payments-db", "payment-processor", "redis-user-cache"]
+    },
+    {
+      "name": "payment-processor",
+      "type": "service",
+      "tier": 1,
+      "namespace": "prod",
+      "replicas": 2,
+      "health_status": "healthy",
+      "owner": "payments-team",
+      "on_call": "alice@company.com",
+      "depends_on": ["payments-db"]
+    },
+    {
+      "name": "auth-service",
+      "type": "service",
+      "tier": 1,
+      "namespace": "prod",
+      "replicas": 3,
+      "health_status": "healthy",
+      "owner": "identity-team",
+      "on_call": "bob@company.com",
+      "depends_on": ["auth-db", "thirdparty-sso"]
+    },
+    {
+      "name": "authentication-service",
+      "type": "service",
+      "tier": 1,
+      "namespace": "prod",
+      "replicas": 2,
+      "health_status": "degraded",
+      "owner": "identity-team",
+      "on_call": "bob@company.com",
+      "depends_on": ["auth-db", "thirdparty-sso"]
+    },
+    {
+      "name": "inventory-service",
+      "type": "service",
+      "tier": 2,
+      "namespace": "prod",
+      "replicas": 2,
+      "health_status": "healthy",
+      "owner": "supply-chain-team",
+      "on_call": "charlie@company.com",
+      "depends_on": ["inventory-db", "redis-cache"]
+    },
+    {
+      "name": "user-profile-service",
+      "type": "service",
+      "tier": 2,
+      "namespace": "prod",
+      "replicas": 2,
+      "health_status": "degraded",
+      "owner": "user-team",
+      "on_call": "dave@company.com",
+      "depends_on": ["redis-user-cache", "user-db"]
+    },
+    {
+      "name": "order-processing-api",
+      "type": "service",
+      "tier": 1,
+      "namespace": "prod",
+      "replicas": 3,
+      "health_status": "healthy",
+      "owner": "orders-team",
+      "on_call": "eve@company.com",
+      "depends_on": ["inventory-service", "payments-service", "inventory-db"]
+    },
+    {
+      "name": "payments-db",
+      "type": "database",
+      "tier": 1,
+      "namespace": "prod",
+      "engine": "postgresql",
+      "max_connections": 100,
+      "current_connections": 100,
+      "health_status": "critical",
+      "owner": "dba-team",
+      "on_call": "alice@company.com",
+      "depends_on": []
+    },
+    {
+      "name": "auth-db",
+      "type": "database",
+      "tier": 1,
+      "namespace": "prod",
+      "engine": "postgresql",
+      "max_connections": 200,
+      "current_connections": 45,
+      "health_status": "healthy",
+      "owner": "dba-team",
+      "on_call": "bob@company.com",
+      "depends_on": []
+    },
+    {
+      "name": "inventory-db",
+      "type": "database",
+      "tier": 2,
+      "namespace": "prod",
+      "engine": "postgresql",
+      "max_connections": 1000,
+      "current_connections": 1000,
+      "health_status": "critical",
+      "owner": "dba-team",
+      "on_call": "charlie@company.com",
+      "depends_on": []
+    },
+    {
+      "name": "user-db",
+      "type": "database",
+      "tier": 2,
+      "namespace": "prod",
+      "engine": "postgresql",
+      "max_connections": 150,
+      "current_connections": 30,
+      "health_status": "healthy",
+      "owner": "dba-team",
+      "on_call": "dave@company.com",
+      "depends_on": []
+    },
+    {
+      "name": "redis-user-cache",
+      "type": "cache",
+      "tier": 2,
+      "namespace": "prod",
+      "engine": "redis",
+      "health_status": "critical",
+      "owner": "platform-team",
+      "on_call": "dave@company.com",
+      "depends_on": []
+    },
+    {
+      "name": "redis-cache",
+      "type": "cache",
+      "tier": 3,
+      "namespace": "prod",
+      "engine": "redis",
+      "health_status": "healthy",
+      "owner": "platform-team",
+      "on_call": "charlie@company.com",
+      "depends_on": []
+    },
+    {
+      "name": "thirdparty-sso",
+      "type": "external",
+      "tier": 1,
+      "namespace": "external",
+      "health_status": "degraded",
+      "owner": "external",
+      "on_call": "N/A",
+      "depends_on": []
+    }
+  ],
+  "on_call_schedules": [
+    {"service_pattern": "payments-*", "engineer": "alice@company.com", "schedule": "24/7", "escalation": "cto@company.com"},
+    {"service_pattern": "auth-*", "engineer": "bob@company.com", "schedule": "business_hours", "escalation": "alice@company.com"},
+    {"service_pattern": "inventory-*", "engineer": "charlie@company.com", "schedule": "business_hours", "escalation": "alice@company.com"},
+    {"service_pattern": "user-*", "engineer": "dave@company.com", "schedule": "business_hours", "escalation": "bob@company.com"},
+    {"service_pattern": "order-*", "engineer": "eve@company.com", "schedule": "24/7", "escalation": "alice@company.com"}
+  ],
+  "known_failure_correlations": [
+    {
+      "services": ["payments-service", "api-gateway", "order-processing-api"],
+      "description": "When payments-db connection pool is exhausted, all three services degrade within 2 minutes",
+      "historical_incident_ids": ["PD-20240519-0042"]
+    },
+    {
+      "services": ["user-profile-service", "payments-service"],
+      "description": "Redis OOM causes session failures in user-profile-service which cascades to payments-service",
+      "historical_incident_ids": ["PD-20260520-1001"]
+    },
+    {
+      "services": ["auth-service", "api-gateway"],
+      "description": "Third-party SSO degradation causes auth failures which block all API gateway traffic",
+      "historical_incident_ids": ["PD-20260520-1005"]
+    }
+  ]
+}

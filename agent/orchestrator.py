@@ -1,53 +1,72 @@
 """
 agent/orchestrator.py
 
-Wires all AIRS LangGraph nodes into a compiled, checkpointed StateGraph.
+Wires all AIRS LangGraph nodes into the Hybrid Memory Architecture graph.
 
-Architecture (ImplementationPlan.md Section 5):
-  ┌─────────────┐
-  │  START       │
+New 14-Node Architecture:
+  ┌──────────────┐
+  │     START    │
   └──────┬───────┘
-         ▼
-  ┌─────────────┐
-  │ triage_node │  → classify severity (P0-P3)
-  └──────┬───────┘
-         │ conditional: P0 → escalate_node, else → investigate_node
-         ▼
-  ┌──────────────────┐
-  │ investigate_node │◄─────────────────────────────────┐
-  └──────┬───────────┘                                  │
-         │ conditional router: should_continue_investigation │
-         │   "plan"       ─────────────────────────────►│ (exit loop)
-         │   "investigate" ────────────────────────────►┘ (loop back)
-         ▼
-  ┌───────────┐
-  │ plan_node │  → draft RemediationPlan
-  └──────┬────┘
-         │ conditional: is_high_risk → reject_node, else → approval_node
-         ▼
-  ┌───────────────┐
-  │ approval_node │  → interrupt() suspends execution for HITL
-  └──────┬────────┘
-         │ resumes via Command(resume={"approved": True/False})
          ▼
   ┌──────────────┐
-  │ execute_node │  → generate postmortem
+  │ triage_node  │ → classify severity (P0-P3)
+  └──────┬───────┘
+         │ conditional: P0 → escalate, else → perception
+         ▼
+  ┌────────────────┐
+  │ perception_node│ → L1/L2/L3 log classification + NeSy routing decision
+  └──────┬─────────┘
+         ▼
+  ┌───────────────────┐
+  │ topology_agent    │ → EKG dependency traversal (no LLM)
+  └──────┬────────────┘
+         ▼
+  ┌───────────────────┐
+  │ diagnostic_agent  │ → CBR retrieval: find similar historical cases
+  └──────┬────────────┘
+         │ conditional: CBR_GUIDED/SYMBOLIC → skip investigate,
+         │              NEURAL_FULL → investigate loop
+         ▼
+  ┌───────────────────┐◄──────────────────────┐
+  │ investigate_node  │                        │  (NEURAL_FULL only)
+  └──────┬────────────┘                        │
+         │ conditional: INVESTIGATION_COMPLETE → extract, else loop ──────┘
+         ▼
+  ┌──────────────┐
+  │ extract_node │ → verbatim evidence extraction
   └──────┬───────┘
          ▼
+  ┌──────────────────┐
+  │  logic_agent     │ → symbolic hypothesis pruning (no LLM)
+  └──────┬───────────┘
+         ▼
+  ┌────────────────────┐
+  │ remediation_agent  │ → CBR-adapted OR LLM-generated plan
+  └──────┬─────────────┘
+         ▼
+  ┌────────────┐
+  │ risk_agent │ → blast radius estimation + execution strategy
+  └──────┬─────┘
+         ▼
+  ┌──────────────────┐
+  │ policy_check     │ → Terraform HCL dry-run + invariant check
+  └──────┬───────────┘
+         │ conditional: blocked → reject | require_approval → approval | canary → canary | direct → approval
+         ▼
+  ┌───────────────┐
+  │ approval_node │ → interrupt() HITL pause
+  └──────┬────────┘
+         │ conditional: approved → canary/direct, rejected → reject
+         ▼
+  ┌────────────────────┐         ┌────────────────────┐
+  │ canary_execute     │   OR    │ direct_execute      │
+  └──────┬─────────────┘         └──────┬─────────────┘
+         ▼                               ▼
+  ┌────────────┐
+  │ retain     │ → store resolved case in CBR (continuous learning)
+  └──────┬─────┘
+         ▼
        END
-
-Durable state:
-  AsyncSqliteSaver.from_conn_string("checkpoints.sqlite") is used as the
-  checkpointer. Every node transition is persisted to disk, enabling the
-  crash-safe resume demo (kill → restart → pass thread_id → resume instantly).
-
-Usage:
-    from agent.orchestrator import build_graph
-
-    async with build_graph() as graph:
-        config = {"configurable": {"thread_id": "incident-001"}}
-        async for event in graph.astream_events(initial_state, config, version="v2"):
-            ...
 """
 
 from __future__ import annotations
@@ -57,8 +76,6 @@ import os
 from contextlib import asynccontextmanager
 from typing import AsyncIterator
 
-from langchain_core.messages import AIMessage, HumanMessage
-from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 try:
     from langgraph.checkpoint.postgres.aio import PostgresSaver
@@ -66,293 +83,120 @@ try:
 except ImportError:
     HAS_POSTGRES = False
     PostgresSaver = None
-from langgraph.config import var_child_runnable_config
 from langgraph.graph import END, START, StateGraph
-from langgraph.types import Command, interrupt
+from langgraph.types import Command
+
 from config import settings
-from agent.integrations.slack import send_slack_approval_request
-from agent.integrations.k8s import apply_kubectl_command
-from agent.security.guardrails import is_safe_command
 
 from agent.nodes import (
     MAX_RETRIES,
-    investigate_node,
-    extract_node,
-    plan_node,
-    should_continue_investigation,
+    # Triage
     triage_node,
+    escalate_node,
+    # Perception
+    perception_node,
+    # Reasoning multi-agents
+    topology_agent_node,
+    diagnostic_agent_node,
+    logic_agent_node,
+    remediation_agent_node,
+    # Risk & Policy
+    risk_agent_node,
+    policy_check_node,
+    # Execution
+    canary_execute_node,
+    direct_execute_node,
+    retain_node,
+    # HITL & Reject
+    reject_node,
+    approval_node,
+    # NEURAL_FULL fallback nodes
+    investigate_node,
+    should_continue_investigation,
+    extract_node,
 )
 from agent.state import GraphState, RemediationPlan
+from agent.reasoning.nesym_router import ReasoningPathway, NeuroSymbolicRouter
 
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Configuration
-# ---------------------------------------------------------------------------
-
-_DB_PATH: str = os.getenv("CHECKPOINT_DB_PATH", "checkpoints.sqlite")
-"""
-Path to the SQLite file used for durable state checkpointing.
-Override via CHECKPOINT_DB_PATH env var (e.g. in tests: ":memory:").
-"""
-
-# ---------------------------------------------------------------------------
-# Additional nodes not defined in nodes.py
-# ---------------------------------------------------------------------------
-
-
-async def escalate_node(state: dict) -> dict:
-    """
-    Zero-trust fast-path for P0 incidents.
-
-    When the triage router detects P0 severity, execution is routed here
-    BEFORE the investigation loop. The node injects a high-priority warning
-    into the message stream and then falls through to investigate_node
-    by routing to it via a normal edge.
-
-    This node does NOT call any LLM — it is a pure deterministic Python
-    guardrail to ensure P0 incidents are flagged before any tool calls.
-
-    In a production system this would also page the on-call engineer via
-    PagerDuty / Slack. Here it appends a visible message to the state so
-    the Rich CLI can render a ⚠ banner.
-    """
-    severity = state.get("severity", "P0")
-    service = ""
-    if tr := state.get("triage_result"):
-        service = tr.service
-
-    logger.warning(
-        "[escalate_node] P0 ESCALATION: service=%s severity=%s", service, severity
-    )
-
-    warning_msg = AIMessage(
-        content=(
-            f"⚠️  **P0 ESCALATION** — {service or 'unknown service'} is experiencing "
-            f"a critical outage. Bypassing standard triage queue. "
-            f"Initiating immediate investigation."
-        )
-    )
-    return {"messages": [warning_msg]}
-
-
-async def approval_node(state: dict, config: RunnableConfig) -> dict:
-    """
-    Human-in-the-Loop approval gate.
-
-    Suspends graph execution using LangGraph's ``interrupt()`` primitive.
-    The CLI reads the interrupt payload, renders the remediation plan to the
-    operator, and waits for typed input.
-
-    Resumption:
-        The CLI calls ``graph.ainvoke(Command(resume={"approved": True}), config)``
-        to resume. If the operator typed 'reject', it passes
-        ``Command(resume={"approved": False})``.
-
-    After resumption, this node reads the ``approved`` value from the
-    ``Command.resume`` dict and writes ``is_approved`` to state.
-
-    Crash-safe demo:
-        Because the checkpoint is written BEFORE interrupt() is called, killing
-        the terminal and restarting the CLI with the same thread_id will land
-        the graph exactly at this node's suspension point. The operator can
-        then approve/reject without re-running triage or investigation.
-    """
-    plan_md: str = state.get("plan", "No plan generated.")
-    remediation_plan: RemediationPlan | None = state.get("remediation_plan")
-
-    high_risk = remediation_plan.is_high_risk if remediation_plan else True
-    risk_label = "HIGH-RISK ⚠️" if high_risk else "Standard ✅"
-
-    logger.info("[approval_node] Suspending for HITL approval. risk=%s", risk_label)
-
-    # In production, dispatch Slack notification instead of terminal blocking
-    if settings.SLACK_BOT_TOKEN:
-        thread_id = config.get("configurable", {}).get("thread_id", "unknown")
-        # Ensure we don't send multiple slack messages on resume
-        if "approved" not in state.keys(): # heuristic for first pass
-            await send_slack_approval_request(plan_md, risk_label, thread_id, high_risk)
-
-    # interrupt() suspends the graph here and surfaces the payload to the CLI.
-    # Execution will not proceed past this line until Command(resume=...) is sent.
-    token = var_child_runnable_config.set(config)
-    try:
-        approval_response: dict = interrupt(
-            {
-                "message": "Review the remediation plan below and type 'approve' to proceed or 'reject' to abort.",
-                "plan": plan_md,
-                "risk": risk_label,
-                "is_high_risk": high_risk,
-            }
-        )
-    finally:
-        var_child_runnable_config.reset(token)
-
-    # approval_response is the dict passed in Command(resume={...})
-    approved: bool = bool(approval_response.get("approved", False))
-    decision = "APPROVED" if approved else "REJECTED"
-
-    logger.info("[approval_node] Operator decision: %s", decision)
-
-    decision_msg = AIMessage(
-        content=(
-            f"Operator decision: **{decision}**. "
-            + ("Proceeding to execution." if approved else "Execution aborted.")
-        )
-    )
-
-    return {
-        "is_approved": approved,
-        "messages": [decision_msg],
-    }
-
-
-async def execute_node(state: dict) -> dict:
-    """
-    Post-approval execution: generate the postmortem document.
-
-    In a real system this node would run the kubectl commands from the
-    remediation plan. Here it generates a structured postmortem markdown
-    document from the accumulated state, simulating a successful fix.
-
-    The postmortem is written to ``postmortem.md`` in the working directory
-    by the CLI — this node only assembles the markdown string.
-
-    Reads:
-        state["remediation_plan"] — For root cause, steps, rollback command.
-        state["raw_alert"]        — For incident metadata.
-        state["triage_result"]    — For severity and service.
-        state["is_approved"]      — Checked as a safety guard.
-
-    Writes:
-        state["postmortem"] — Markdown postmortem string.
-        state["messages"]   — Appends execution summary AIMessage.
-    """
-    if not state.get("is_approved", False):
-        # Should never reach here without approval due to routing, but guard anyway
-        logger.error("[execute_node] Called without operator approval — aborting.")
-        abort_msg = AIMessage(
-            content="❌ Execution aborted: remediation plan was not approved."
-        )
-        return {"messages": [abort_msg]}
-
-    alert = state.get("raw_alert", {})
-    plan: RemediationPlan | None = state.get("remediation_plan")
-    triage = state.get("triage_result")
-
-    service = triage.service if triage else alert.get("service", "unknown")
-    severity = state.get("severity", "unknown")
-
-    logger.info("[execute_node] Generating postmortem for service=%s", service)
-
-    # --- Simulate execution of each kubectl / shell step ---
-    executed_steps: list[str] = []
-    if plan:
-        for step in sorted(plan.steps, key=lambda s: s.order):
-            log_line = f"✅ Step {step.order}: {step.action}"
-            
-            if step.command:
-                # Apply Guardrails
-                if not is_safe_command(step.command):
-                    log_line += f"\n   `[BLOCKED BY GUARDRAIL] {step.command}`"
-                else:
-                    # Apply Kubernetes SDK
-                    k8s_result = apply_kubectl_command(step.command)
-                    log_line += f"\n   `{step.command}`\n   Output: {k8s_result}"
-                    
-            executed_steps.append(log_line)
-            logger.info("[execute_node] %s", log_line)
-
-    # --- Build postmortem document ---
-    postmortem = _build_postmortem(
-        alert=alert,
-        plan=plan,
-        service=service,
-        severity=severity,
-        executed_steps=executed_steps,
-    )
-
-    exec_msg = AIMessage(
-        content=(
-            f"✅ Remediation executed successfully for **{service}** ({severity}).\n"
-            f"Postmortem document generated ({len(postmortem)} chars)."
-        )
-    )
-
-    return {
-        "postmortem": postmortem,
-        "messages": [exec_msg],
-    }
-
-
-async def reject_node(state: dict) -> dict:
-    """
-    Handles high-risk plans with no rollback command.
-
-    If plan_node generates a RemediationPlan where is_high_risk is True,
-    the plan router sends execution here instead of the approval node.
-    The node appends a clear rejection message and routes to END.
-    """
-    plan: RemediationPlan | None = state.get("remediation_plan")
-    logger.warning(
-        "[reject_node] High-risk plan rejected. rollback_command=%r",
-        plan.rollback_command if plan else "N/A",
-    )
-    reject_msg = AIMessage(
-        content=(
-            "🚫 **Plan rejected by zero-trust guardrail**: The generated remediation "
-            "plan does not include a rollback command. Automated execution of "
-            "irreversible operations is blocked. A human operator must review and "
-            "manually supply a rollback strategy before proceeding."
-        )
-    )
-    return {"messages": [reject_msg], "is_approved": False}
+_DB_PATH: str = os.getenv("CHECKPOINT_DB_PATH", settings.CHECKPOINT_DB_PATH)
+_NESYM_ROUTER = NeuroSymbolicRouter()
 
 
 # ---------------------------------------------------------------------------
 # Routing functions
 # ---------------------------------------------------------------------------
 
-
 def _route_after_triage(state: dict) -> str:
-    """
-    After triage_node: P0 → escalate first, all other severities → investigate.
-    """
+    """P0 → escalate first, else → perception."""
     severity: str = state.get("severity", "")
     if severity == "P0":
-        logger.info("[router] P0 detected → escalate_node")
+        logger.info("[router] P0 → escalate_node")
         return "escalate"
-    logger.info("[router] severity=%s → investigate_node", severity)
-    return "investigate"
+    logger.info("[router] severity=%s → perception_node", severity)
+    return "perception"
+
+
+def _route_after_diagnostic(state: dict) -> str:
+    """
+    NeSy routing decision after CBR retrieval.
+
+    SYMBOLIC_FAST / CBR_GUIDED → skip investigation, go straight to logic_agent.
+    NEURAL_FULL → full ReAct investigation loop.
+    """
+    perception_stats = state.get("perception_stats", {})
+    cbr_confidence = state.get("cbr_confidence", 0.0)
+    primary_template = state.get("primary_log_template", "")
+
+    routing = _NESYM_ROUTER.route(perception_stats, cbr_confidence, primary_template)
+    logger.info(
+        "[router] NeSy routing decision: %s (cbr=%.0f%% l1=%.0f%%)",
+        routing.pathway.value, cbr_confidence * 100, routing.l1_rate * 100,
+    )
+
+    if routing.pathway in (ReasoningPathway.SYMBOLIC_FAST, ReasoningPathway.CBR_GUIDED):
+        return "logic"       # Skip investigation → symbolic pruning
+    return "investigate"     # Full ReAct loop
 
 
 def _route_after_plan(state: dict) -> str:
-    """
-    After plan_node: high-risk plans (no rollback) → reject_node,
-    safe plans → approval_node.
-    """
+    """High-risk plans (no rollback) → reject, safe → risk_agent."""
     plan: RemediationPlan | None = state.get("remediation_plan")
     if plan and plan.is_high_risk:
-        logger.warning("[router] Plan is high-risk → reject_node")
+        logger.warning("[router] High-risk plan (no rollback) → reject_node")
         return "reject"
-    logger.info("[router] Plan is safe → approval_node")
-    return "approve"
+    return "risk"
+
+
+def _route_after_policy(state: dict) -> str:
+    """
+    Route based on execution_strategy set by risk_agent + policy_check:
+      blocked          → reject
+      require_approval → approval
+      canary           → approval (operator must still confirm)
+      direct           → approval (same)
+    """
+    strategy = state.get("execution_strategy", "require_approval")
+    logger.info("[router] execution_strategy=%s", strategy)
+    if strategy == "blocked":
+        return "reject"
+    return "approval"   # All non-blocked strategies go through HITL
 
 
 def _route_after_approval(state: dict) -> str:
-    """
-    After approval_node: approved → execute_node, rejected → END.
-    """
-    if state.get("is_approved", False):
-        return "execute"
-    logger.info("[router] Operator rejected plan → END")
-    return END
+    """After HITL: approved → canary or direct based on strategy, rejected → reject."""
+    if not state.get("is_approved", False):
+        return "reject"
+    strategy = state.get("execution_strategy", "require_approval")
+    if strategy == "canary":
+        return "canary"
+    return "direct"
 
 
 # ---------------------------------------------------------------------------
-# Postmortem builder
+# Legacy postmortem helper (preserved for backward compatibility)
 # ---------------------------------------------------------------------------
-
 
 def _build_postmortem(
     alert: dict,
@@ -412,10 +256,9 @@ def _build_postmortem(
 
 ## Action Items
 
-- [ ] Add integration test covering connection pool exhaustion scenario
-- [ ] Set alert threshold for pool utilisation > 80% (current: no warning)
-- [ ] Review long-running transaction handling in the payment processor
-- [ ] Add `finally` block to all database session managers
+- [ ] Add integration test covering this failure scenario
+- [ ] Review on-call runbook for `{service}`
+- [ ] Set alert threshold 20% below failure threshold
 - [ ] Schedule blameless post-incident review with on-call team
 
 ---
@@ -432,157 +275,184 @@ def _build_postmortem(
 @asynccontextmanager
 async def build_graph() -> AsyncIterator:
     """
-    Async context manager that constructs and yields a compiled LangGraph
-    StateGraph backed by AsyncSqliteSaver for durable checkpointing.
+    Async context manager: constructs and yields the compiled AIRS LangGraph.
 
-    The SQLite connection is opened inside the context manager and closed
-    cleanly on exit, preventing file-lock issues in the demo environment.
+    Automatically selects:
+      - PostgreSQL checkpointer when DATABASE_URL is set (production).
+      - SQLite checkpointer otherwise (local dev / demo mode).
 
     Usage:
         async with build_graph() as graph:
-            config = {"configurable": {"thread_id": "incident-abc"}}
-            result = await graph.ainvoke(initial_state, config)
+            config = {"configurable": {"thread_id": "incident-001"}}
+            async for event in graph.astream_events(initial_state, config, version="v2"):
+                ...
 
     Crash-safe resume:
-        Because every node transition is persisted to disk, you can kill the
-        process mid-execution and resume by calling:
-            async with build_graph() as graph:
-                await graph.ainvoke(
-                    Command(resume={"approved": True}),
-                    config,   # same thread_id
-                )
-        The graph will pick up from the exact checkpoint where it left off.
+        async with build_graph() as graph:
+            await graph.ainvoke(
+                Command(resume={"approved": True}),
+                config,  # same thread_id
+            )
     """
     if settings.DATABASE_URL:
         if not HAS_POSTGRES:
             raise ImportError(
-                "DATABASE_URL is configured, but 'langgraph-checkpoint-postgres' is not installed. "
-                "Please run: pip install -U \"langgraph-checkpoint-postgres[psycopg]\""
+                "DATABASE_URL is configured but 'langgraph-checkpoint-postgres' is not installed. "
+                "Run: pip install -U 'langgraph-checkpoint-postgres[psycopg]'"
             )
-        # Use Postgres checkpointer if DB URL is configured
         async with PostgresSaver.from_conn_string(settings.DATABASE_URL) as checkpointer:
             await checkpointer.setup()
             graph = _build_compiled_graph(checkpointer)
             logger.info(
-                "[orchestrator] Graph compiled with %d nodes. Checkpointing to Postgres.",
-                len(graph.nodes)
+                "[orchestrator] Graph compiled with %d nodes (Postgres checkpointer).",
+                len(graph.nodes),
             )
             yield graph
     else:
-        # Fall back to SQLite
         async with AsyncSqliteSaver.from_conn_string(_DB_PATH) as checkpointer:
             graph = _build_compiled_graph(checkpointer)
             logger.info(
-                "[orchestrator] Graph compiled with %d nodes. Checkpointing to %s",
-                len(graph.nodes),
-                _DB_PATH,
+                "[orchestrator] Graph compiled with %d nodes (SQLite checkpointer: %s).",
+                len(graph.nodes), _DB_PATH,
             )
             yield graph
 
 
-def _build_compiled_graph(checkpointer: AsyncSqliteSaver):
+def _build_compiled_graph(checkpointer):
     """
-    Pure graph construction — separated from the context manager so it can
-    be called in tests with an in-memory checkpointer.
+    Pure graph construction — separated from the context manager so tests
+    can inject an in-memory checkpointer without spawning DB connections.
 
-    Node map:
-      triage       → triage_node
-      escalate     → escalate_node        (P0 fast-path)
-      investigate  → investigate_node     (ReAct loop)
-      plan         → plan_node
-      approval     → approval_node        (interrupt / HITL)
-      execute      → execute_node
-      reject       → reject_node          (high-risk guardrail)
+    Node topology (14 nodes + START/END):
 
-    Edge map:
-      START         → triage
-      triage        → escalate | investigate      (conditional: P0 vs other)
-      escalate      → investigate                 (deterministic: always investigate after escalation)
-      investigate   → investigate | plan          (conditional: should_continue_investigation)
-      plan          → approval | reject           (conditional: is_high_risk)
-      approval      → execute | END              (conditional: is_approved)
-      execute       → END
-      reject        → END
+      START → triage → [escalate →] perception → topology_agent → diagnostic_agent
+        → [investigate ↺ |] extract → logic_agent → remediation_agent → risk_agent
+        → policy_check → [reject | approval → [reject | canary | direct] → retain] → END
     """
-    # Build graph with the GraphState schema
-    # Using dict as state type (TypedDict-compatible) with add_messages reducer
     graph = StateGraph(GraphState)
 
     # ------------------------------------------------------------------
-    # Register nodes
+    # Register all nodes
     # ------------------------------------------------------------------
+
+    # Phase 0: Triage
     graph.add_node("triage", triage_node)
     graph.add_node("escalate", escalate_node)
+
+    # Phase 3: Perception
+    graph.add_node("perception", perception_node)
+
+    # Phase 1: EKG Topology
+    graph.add_node("topology_agent", topology_agent_node)
+
+    # Phase 2: CBR Diagnostic
+    graph.add_node("diagnostic_agent", diagnostic_agent_node)
+
+    # Phase 4: NEURAL_FULL investigate loop (used only when CBR confidence is low)
     graph.add_node("investigate", investigate_node)
     graph.add_node("extract", extract_node)
-    graph.add_node("plan", plan_node)
+
+    # Phase 4: Symbolic pruning + plan generation
+    graph.add_node("logic_agent", logic_agent_node)
+    graph.add_node("remediation_agent", remediation_agent_node)
+
+    # Phase 5a: Risk assessment
+    graph.add_node("risk_agent", risk_agent_node)
+
+    # Phase 5b: Policy-as-Code
+    graph.add_node("policy_check", policy_check_node)
+
+    # HITL approval gate
     graph.add_node("approval", approval_node)
-    graph.add_node("execute", execute_node)
+
+    # Execution
+    graph.add_node("canary", canary_execute_node)
+    graph.add_node("direct_execute", direct_execute_node)
+
+    # Continuous learning
+    graph.add_node("retain", retain_node)
+
+    # Rejection / escalation terminal
     graph.add_node("reject", reject_node)
 
     # ------------------------------------------------------------------
     # Register edges
     # ------------------------------------------------------------------
 
-    # Entry point
+    # Entry: START → triage
     graph.add_edge(START, "triage")
 
-    # After triage: route by severity
+    # Triage → (escalate for P0 | perception for all others)
     graph.add_conditional_edges(
         "triage",
         _route_after_triage,
-        {
-            "escalate": "escalate",
-            "investigate": "investigate",
-        },
+        {"escalate": "escalate", "perception": "perception"},
     )
 
-    # After escalation: always proceed to investigation
-    graph.add_edge("escalate", "investigate")
+    # Escalate always falls through to perception (after Slack notification)
+    graph.add_edge("escalate", "perception")
 
-    # Investigation ReAct loop
+    # Perception → topology (always sequential)
+    graph.add_edge("perception", "topology_agent")
+
+    # Topology → diagnostic (always sequential)
+    graph.add_edge("topology_agent", "diagnostic_agent")
+
+    # Diagnostic → (logic [SYMBOLIC/CBR] | investigate [NEURAL_FULL])
+    graph.add_conditional_edges(
+        "diagnostic_agent",
+        _route_after_diagnostic,
+        {"logic": "logic_agent", "investigate": "investigate"},
+    )
+
+    # Investigation ReAct loop (NEURAL_FULL only)
     graph.add_conditional_edges(
         "investigate",
         should_continue_investigation,
-        {
-            "investigate": "investigate",   # loop back
-            "plan": "extract",               # exit loop to extract node
-        },
+        {"investigate": "investigate", "extract": "extract"},
     )
 
-    # After extract: sequential flow into plan
-    graph.add_edge("extract", "plan")
+    # Extract → logic (join both pathways at logic_agent)
+    graph.add_edge("extract", "logic_agent")
 
-    # After plan: zero-trust guardrail check
+    # Logic → remediation (always sequential)
+    graph.add_edge("logic_agent", "remediation_agent")
+
+    # Remediation → risk assessment
     graph.add_conditional_edges(
-        "plan",
+        "remediation_agent",
         _route_after_plan,
-        {
-            "approve": "approval",
-            "reject": "reject",
-        },
+        {"risk": "risk_agent", "reject": "reject"},
     )
 
-    # After approval: operator decision
+    # Risk → policy check
+    graph.add_edge("risk_agent", "policy_check")
+
+    # Policy check → (reject [blocked] | approval [all other strategies])
+    graph.add_conditional_edges(
+        "policy_check",
+        _route_after_policy,
+        {"reject": "reject", "approval": "approval"},
+    )
+
+    # Approval → (reject [operator rejected] | canary | direct_execute)
     graph.add_conditional_edges(
         "approval",
         _route_after_approval,
         {
-            "execute": "execute",
-            END: END,
+            "reject": "reject",
+            "canary": "canary",
+            "direct": "direct_execute",
         },
     )
 
-    # Terminal nodes
-    graph.add_edge("execute", END)
+    # Both execution paths converge at retain (continuous learning)
+    graph.add_edge("canary", "retain")
+    graph.add_edge("direct_execute", "retain")
+    graph.add_edge("retain", END)
     graph.add_edge("reject", END)
 
     # ------------------------------------------------------------------
     # Compile with checkpointer
     # ------------------------------------------------------------------
-    return graph.compile(
-        checkpointer=checkpointer,
-        # interrupt_before is NOT set here — we use the interrupt() primitive
-        # inside approval_node itself, which is the idiomatic LangGraph approach
-        # for dynamic, payload-bearing HITL pauses.
-    )
+    return graph.compile(checkpointer=checkpointer)

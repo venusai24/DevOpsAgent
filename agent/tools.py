@@ -277,5 +277,162 @@ async def get_logs(
 # Convenience export
 # ---------------------------------------------------------------------------
 
-ALL_TOOLS = [get_metrics, get_logs]
-"""Flat list of all investigation tools. Pass to ``llm.bind_tools(ALL_TOOLS)``."""
+# ---------------------------------------------------------------------------
+# Tool: query_topology
+# ---------------------------------------------------------------------------
+
+
+@tool
+async def query_topology(service: str, depth: int = 2) -> str:
+    """
+    Query the Enterprise Knowledge Graph (EKG) for the dependency chain
+    and health status of a specific microservice.
+
+    Use this tool when you need to understand:
+      - Which databases, caches, or downstream services does this service depend on?
+      - Are any dependencies currently in a degraded or critical state?
+      - What is the service tier (1=critical, 2=internal, 3=batch)?
+
+    This tool is essential for blast radius assessment and cascade failure detection.
+
+    Args:
+        service: Canonical microservice name (e.g. 'payments-service').
+        depth:   Number of dependency hops to traverse (1-4). Default 2.
+
+    Returns:
+        Markdown summary of the dependency chain with health status indicators.
+        🔴 = critical, 🟡 = degraded, 🟢 = healthy, ⚪ = unknown.
+
+    Raises:
+        ToolException: If the service is not found in the topology.
+    """
+    url = f"{_get_base_url()}/topology/{service}/dependencies"
+    logger.info("TOOL query_topology  service=%s  depth=%d", service, depth)
+
+    try:
+        data = await _get(url, {"depth": str(depth)})
+    except ToolException:
+        # Fall back to full topology if service-specific lookup fails
+        data = await _get(f"{_get_base_url()}/topology", {})
+
+    nodes: list[dict] = data.get("nodes", [])
+    edges: list[dict] = data.get("edges", [])
+    focus = data.get("focus_service", service)
+
+    lines = [f"## EKG Topology: `{focus}` (depth={depth})\n"]
+    lines.append("### Nodes")
+    health_icons = {"healthy": "🟢", "degraded": "🟡", "critical": "🔴", "unknown": "⚪"}
+    for node in nodes:
+        icon = health_icons.get(node.get("health_status", "unknown"), "⚪")
+        tier = node.get("tier", "?")
+        node_type = node.get("node_type", "service")
+        name = node.get("name", "?")
+        owner = node.get("owner", "unknown")
+        health = node.get("health_status", "unknown").upper()
+        lines.append(f"- {icon} **{name}** [Tier {tier}] [{node_type}] — {health} (owner: {owner})")
+
+    if edges:
+        lines.append("\n### Dependencies")
+        for edge in edges:
+            err_rate = edge.get("error_rate_pct", 0)
+            protocol = edge.get("protocol", "http")
+            flag = " ⚠️" if err_rate > 5 else ""
+            lines.append(f"- `{edge['source']}` → `{edge['target']}` ({protocol}, err={err_rate:.1f}%){flag}")
+
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Tool: search_historical_incidents
+# ---------------------------------------------------------------------------
+
+
+@tool
+async def search_historical_incidents(
+    category: str = "",
+    service: str = "",
+    limit: int = 3,
+) -> str:
+    """
+    Search the Case-Based Reasoning (CBR) database for historical incidents
+    that match the current failure pattern.
+
+    Use this tool when you need to:
+      - Find precedents for the current root cause category.
+      - Retrieve proven remediation steps from past incidents.
+      - Estimate MTTR based on similar past resolutions.
+
+    The CBR database contains resolved incidents with:
+      - Root cause category (e.g. 'connection_pool_exhaustion', 'oom_killed')
+      - Ordered remediation steps with exact kubectl commands
+      - Outcome and MTTR from the actual resolution
+
+    Args:
+        category: Root cause category to filter by (partial match, optional).
+                  Examples: 'connection_pool', 'oom', 'dns', 'disk', 'tls'
+        service:  Service name to filter by (partial match, optional).
+        limit:    Maximum number of results to return (1-20). Default 3.
+
+    Returns:
+        Markdown table of matching historical incidents with similarity hints,
+        MTTR, and a link to the postmortem summary for each case.
+
+    Raises:
+        ToolException: If the server is unreachable.
+    """
+    url = f"{_get_base_url()}/incidents/search"
+    params: dict[str, str] = {"limit": str(limit)}
+    if category:
+        params["category"] = category
+    if service:
+        params["service"] = service
+
+    logger.info("TOOL search_historical_incidents  category=%r  service=%r", category, service)
+    data = await _get(url, params)
+
+    results: list[dict] = data.get("results", [])
+    total: int = data.get("total", 0)
+
+    if not results:
+        return (
+            f"No historical incidents found for category='{category}' service='{service}'. "
+            "Try broader search terms or omit filters."
+        )
+
+    lines = [
+        f"## Historical Incident Precedents ({total} total, showing {len(results)})\n",
+        "| ID | Service | Category | MTTR | Outcome |",
+        "|-----|---------|----------|------|---------|" ,
+    ]
+    for case in results:
+        lines.append(
+            f"| `{case.get('incident_id', '?')}` "
+            f"| `{case.get('service', '?')}` "
+            f"| `{case.get('root_cause_category', '?')}` "
+            f"| {case.get('mttr_minutes', '?')}m "
+            f"| {case.get('outcome', '?')} |"
+        )
+    lines.append("")
+    for case in results:
+        summary = case.get("postmortem_summary", "")
+        if summary:
+            lines.append(f"**{case.get('incident_id', '?')}**: {summary[:150]}")
+
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Convenience export
+# ---------------------------------------------------------------------------
+
+ALL_TOOLS = [get_metrics, get_logs, query_topology, search_historical_incidents]
+"""
+Flat list of all investigation tools bound to the LLM in the NEURAL_FULL pathway.
+Pass to ``llm.bind_tools(ALL_TOOLS)``.
+
+Tool selection guide for the LLM:
+  get_metrics                — Quantify numeric anomalies (CPU, memory, DB pool, error rate)
+  get_logs                   — Inspect specific error messages and stack traces
+  query_topology             — Understand service dependencies and health status
+  search_historical_incidents — Find proven remediation plans from past incidents
+"""

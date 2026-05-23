@@ -1,11 +1,26 @@
 """
 mock_enterprise/api.py
 
-Simulates Datadog (metrics) and Splunk (logs) monitoring APIs for the
-Autonomous Incident Response System (AIRS) demo environment.
+Simulates the full AIRS enterprise telemetry and knowledge layer:
 
-The payloads are seeded for a specific incident scenario:
-    - payments-service database connection pool exhaustion (P0 severity)
+  Telemetry endpoints:
+    GET /metrics          — Datadog / Prometheus metric time-series
+    GET /logs             — Splunk / CloudWatch log entries
+
+  Enterprise Knowledge Graph (EKG) endpoints:
+    GET /topology                           — Full infrastructure topology
+    GET /topology/{service}/dependencies    — Dependency chain for a service
+    POST /topology/blast-radius             — Blast radius calculation
+    PATCH /topology/{service}/health        — Update service health status
+
+  Case-Based Reasoning (CBR) endpoints:
+    GET /incidents/search                   — Cosine-similarity incident search
+    POST /incidents                         — Store a resolved incident case
+
+  Meta endpoints:
+    GET /health                             — Liveness probe
+    GET /alert                              — Active incident alert payload
+    POST /active_incident                   — Switch the active incident scenario
 
 Run with:
     uvicorn mock_enterprise.api:app --host 0.0.0.0 --port 8000 --reload
@@ -37,10 +52,19 @@ app = FastAPI(
     version="1.0.0",
 )
 
-# Load fixtures once at startup so every request is sub-millisecond.
+# Load incident fixtures once at startup.
 _FIXTURES_PATH = Path(__file__).parent / "fixtures.json"
 with _FIXTURES_PATH.open() as _f:
     _FIXTURES: dict[str, Any] = json.load(_f)
+
+# Load topology fixtures (EKG) once at startup.
+_TOPOLOGY_PATH = Path(__file__).parent / "topology_fixtures.json"
+_TOPOLOGY: dict[str, Any] = {}
+if _TOPOLOGY_PATH.exists():
+    with _TOPOLOGY_PATH.open() as _tf:
+        _TOPOLOGY = json.load(_tf)
+else:
+    logger.warning("topology_fixtures.json not found — EKG endpoints will return empty data.")
 
 _active_incident_key = "db_connection_exhaustion"
 
@@ -259,6 +283,268 @@ async def get_logs(
         "log_entries": logs,
     }
     return JSONResponse(content=response_body)
+
+
+# ---------------------------------------------------------------------------
+# EKG Topology endpoints
+# ---------------------------------------------------------------------------
+
+
+@app.get(
+    "/topology",
+    summary="Full infrastructure topology",
+    tags=["EKG"],
+)
+async def get_topology() -> JSONResponse:
+    """
+    Return the full enterprise topology graph: all services, databases,
+    caches, external dependencies, and their directed dependency edges.
+    """
+    logger.info("GET /topology")
+    return JSONResponse(content={
+        "status": "ok",
+        "nodes": _TOPOLOGY.get("nodes", []),
+        "edges": _TOPOLOGY.get("edges", []),
+        "node_count": len(_TOPOLOGY.get("nodes", [])),
+        "edge_count": len(_TOPOLOGY.get("edges", [])),
+    })
+
+
+@app.get(
+    "/topology/{service}/dependencies",
+    summary="Dependency chain for a specific service",
+    tags=["EKG"],
+)
+async def get_service_dependencies(
+    service: str,
+    depth: int = Query(2, ge=1, le=4, description="Traversal depth (1-4 hops)."),
+) -> JSONResponse:
+    """
+    Return all services that ``service`` directly or transitively depends on,
+    up to ``depth`` hops. Also returns the health status of each dependency.
+    """
+    logger.info("GET /topology/%s/dependencies  depth=%d", service, depth)
+
+    nodes = _TOPOLOGY.get("nodes", [])
+    edges = _TOPOLOGY.get("edges", [])
+
+    # Find the focal node
+    focal = next((n for n in nodes if n["name"].lower() == service.lower()), None)
+    if focal is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Service '{service}' not found in topology. "
+                   f"Available: {[n['name'] for n in nodes[:10]]}"
+        )
+
+    # BFS traversal up to `depth` hops
+    visited: set[str] = {service}
+    frontier: set[str] = {service}
+    dep_nodes: list[dict] = [focal]
+    dep_edges: list[dict] = []
+
+    for _ in range(depth):
+        next_frontier: set[str] = set()
+        for edge in edges:
+            if edge.get("source") in frontier and edge.get("target") not in visited:
+                target_name = edge["target"]
+                next_frontier.add(target_name)
+                visited.add(target_name)
+                dep_edges.append(edge)
+                target_node = next((n for n in nodes if n["name"] == target_name), None)
+                if target_node:
+                    dep_nodes.append(target_node)
+        frontier = next_frontier
+        if not frontier:
+            break
+
+    return JSONResponse(content={
+        "status": "ok",
+        "focus_service": service,
+        "depth": depth,
+        "nodes": dep_nodes,
+        "edges": dep_edges,
+        "dependency_count": len(dep_nodes) - 1,
+    })
+
+
+@app.post(
+    "/topology/blast-radius",
+    summary="Calculate blast radius for a target service",
+    tags=["EKG"],
+)
+async def calculate_blast_radius(payload: dict) -> JSONResponse:
+    """
+    Calculate the blast radius (upstream dependents) of a target service.
+
+    Unlike dependency traversal (downstream), blast radius finds all services
+    that **depend on** the target and would be impacted if it fails.
+
+    Body:
+        {"service": "payments-service"}
+    """
+    service = payload.get("service", "")
+    logger.info("POST /topology/blast-radius  service=%s", service)
+
+    nodes = _TOPOLOGY.get("nodes", [])
+    edges = _TOPOLOGY.get("edges", [])
+
+    # Find the focal node
+    focal = next((n for n in nodes if n["name"].lower() == service.lower()), None)
+    if focal is None:
+        raise HTTPException(status_code=404, detail=f"Service '{service}' not found.")
+
+    # BFS upstream: find services that depend ON this service
+    visited: set[str] = {service}
+    frontier: set[str] = {service}
+    affected: list[str] = []
+    tier1_services: list[str] = []
+    on_call_contacts: list[str] = []
+
+    for _ in range(4):  # Max 4 hops upstream
+        next_frontier: set[str] = set()
+        for edge in edges:
+            # Reverse direction: find who depends on services in frontier
+            if edge.get("target") in frontier and edge.get("source") not in visited:
+                src = edge["source"]
+                next_frontier.add(src)
+                visited.add(src)
+                affected.append(src)
+                src_node = next((n for n in nodes if n["name"] == src), None)
+                if src_node:
+                    if src_node.get("tier", 3) == 1:
+                        tier1_services.append(src)
+                    if src_node.get("on_call"):
+                        on_call_contacts.append(src_node["on_call"])
+        frontier = next_frontier
+        if not frontier:
+            break
+
+    tier1_impact = bool(tier1_services)
+    risk_score = min(1.0, round(
+        (len(affected) / max(1, len(nodes))) * 0.5 +
+        (1.0 if tier1_impact else 0.0) * 0.5,
+        2
+    ))
+    recommendation = "block" if risk_score >= 0.8 else (
+        "require_approval" if tier1_impact or risk_score >= 0.3 else "auto_execute"
+    )
+
+    return JSONResponse(content={
+        "status": "ok",
+        "target_service": service,
+        "affected_services": affected,
+        "tier1_services": tier1_services,
+        "tier1_impact": tier1_impact,
+        "risk_score": risk_score,
+        "recommendation": recommendation,
+        "on_call_contacts": list(set(on_call_contacts)),
+        "estimated_user_impact_pct": round(risk_score * 100, 1),
+    })
+
+
+@app.patch(
+    "/topology/{service}/health",
+    summary="Update service health status",
+    tags=["EKG"],
+)
+async def update_service_health(service: str, payload: dict) -> JSONResponse:
+    """
+    Update the health_status of a node in the topology fixture.
+    Used by topology_agent_node to mark a service as 'critical' during an incident.
+
+    Body: {"health_status": "critical" | "degraded" | "healthy" | "unknown"}
+    """
+    status = payload.get("health_status", "unknown")
+    logger.info("PATCH /topology/%s/health  status=%s", service, status)
+
+    for node in _TOPOLOGY.get("nodes", []):
+        if node["name"].lower() == service.lower():
+            node["health_status"] = status
+            return JSONResponse(content={"status": "ok", "service": service, "health_status": status})
+
+    raise HTTPException(status_code=404, detail=f"Service '{service}' not found.")
+
+
+# ---------------------------------------------------------------------------
+# CBR Incident endpoints
+# ---------------------------------------------------------------------------
+
+
+@app.get(
+    "/incidents/search",
+    summary="Search historical incidents by category",
+    tags=["CBR"],
+)
+async def search_incidents(
+    category: str = Query("", description="Root cause category filter (partial match)."),
+    service: str = Query("", description="Service name filter."),
+    limit: int = Query(5, ge=1, le=20, description="Maximum results to return."),
+) -> JSONResponse:
+    """
+    Search the seeded historical incident database for cases matching the
+    given category or service name. Used by the CBR diagnostic agent to
+    surface relevant precedents during investigation.
+    """
+    logger.info(
+        "GET /incidents/search  category=%r  service=%r  limit=%d",
+        category, service, limit,
+    )
+
+    # Source results from topology_fixtures.json historical_incidents section
+    all_cases = _TOPOLOGY.get("historical_incidents", [])
+
+    # Also fold in incident fixtures
+    for inc in _FIXTURES.get("incidents", {}).values():
+        alert = inc.get("alert", {})
+        all_cases.append({
+            "incident_id": alert.get("id", "unknown"),
+            "service": alert.get("service", "unknown"),
+            "root_cause_category": inc.get("root_cause_category", "unknown"),
+            "severity": alert.get("severity", "P1"),
+            "outcome": "resolved",
+            "mttr_minutes": inc.get("mttr_minutes", 15),
+            "postmortem_summary": alert.get("description", "")[:200],
+        })
+
+    # Filter
+    results = [
+        c for c in all_cases
+        if (not category or category.lower() in c.get("root_cause_category", "").lower())
+        and (not service or service.lower() in c.get("service", "").lower())
+    ]
+
+    return JSONResponse(content={
+        "status": "ok",
+        "total": len(results),
+        "results": results[:limit],
+    })
+
+
+@app.post(
+    "/incidents",
+    summary="Store a resolved incident case",
+    tags=["CBR"],
+    status_code=201,
+)
+async def store_incident(payload: dict) -> JSONResponse:
+    """
+    Store a newly resolved incident as a historical case.
+    Called by retain_node after successful remediation to close
+    the continuous learning loop.
+    """
+    incident_id = payload.get("incident_id", "unknown")
+    logger.info("POST /incidents  incident_id=%s", incident_id)
+
+    # Append to in-memory topology historical_incidents list
+    if "historical_incidents" not in _TOPOLOGY:
+        _TOPOLOGY["historical_incidents"] = []
+    _TOPOLOGY["historical_incidents"].append(payload)
+
+    return JSONResponse(
+        status_code=201,
+        content={"status": "stored", "incident_id": incident_id},
+    )
 
 
 # ---------------------------------------------------------------------------

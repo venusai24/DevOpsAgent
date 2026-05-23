@@ -16,6 +16,23 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
 
+  neo4j:
+    image: neo4j:5-community
+    environment:
+      NEO4J_AUTH: neo4j/airs_password
+      NEO4J_PLUGINS: '["apoc"]'
+    ports:
+      - "7474:7474"   # HTTP browser
+      - "7687:7687"   # Bolt protocol
+    healthcheck:
+      test: ["CMD-SHELL", "wget -O /dev/null -q http://localhost:7474 || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+    volumes:
+      - neo4j_data:/data
+      - neo4j_logs:/logs
+
   redis:
     image: redis:7-alpine
     ports:
@@ -33,11 +50,16 @@ services:
       - REDIS_URL=redis://redis:6379/0
       - CELERY_BROKER_URL=redis://redis:6379/0
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - NEO4J_URI=bolt://neo4j:7687
+      - NEO4J_USER=neo4j
+      - NEO4J_PASSWORD=airs_password
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_started
+      neo4j:
+        condition: service_healthy
     volumes:
       - .:/app
 
@@ -49,14 +71,21 @@ services:
       - REDIS_URL=redis://redis:6379/0
       - CELERY_BROKER_URL=redis://redis:6379/0
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - NEO4J_URI=bolt://neo4j:7687
+      - NEO4J_USER=neo4j
+      - NEO4J_PASSWORD=airs_password
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_started
+      neo4j:
+        condition: service_healthy
     volumes:
       - .:/app
 
 volumes:
   postgres_data:
   redis_data:
+  neo4j_data:
+  neo4j_logs:
