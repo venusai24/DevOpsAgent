@@ -1,0 +1,620 @@
+# AIRS Knowledge Base — Seed Entries
+# Version: 1  |  Source: SRE-Curated-Seed-v1
+#
+# Each entry is a ground-truth mapping:
+#   Error Pattern  →  Root Cause  →  Remediation Actions
+#
+# Commands support the {service} placeholder, which is substituted at runtime
+# with the canonical service name from the triage result.
+#
+# To add a new entry:
+#   1. Add a block below following the schema.
+#   2. Run:  python -m agent.kb.seed  (re-seeds the DB, skipping existing IDs)
+#   3. Open a PR — all entries are version-controlled.
+#
+# Fields:
+#   entry_id          : unique string ID (kb-NNN format)
+#   incident_taxonomy : "<GoldenSignal>:<SubType>"
+#   pattern_type      : exact | regex | semantic
+#   error_pattern     : string to match against alert + telemetry text
+#   affected_services : list of service names (empty = any service)
+#   severity          : P0 | P1 | P2 | P3
+#   root_cause_narrative  : human-readable causal explanation
+#   remediation_steps : ordered list of {order, action, environment, command, risk, validation_check}
+#   rollback_command  : single revert command
+#   validation_check  : PromQL/Datadog query to confirm resolution
+#   confidence_score  : 0.0–1.0 (historical success rate)
+#   data_source       : origin label
+#   version           : integer
+
+entries:
+
+  # -------------------------------------------------------------------------
+  # KB-001: Database connection pool exhaustion
+  # -------------------------------------------------------------------------
+  - entry_id: "kb-001"
+    incident_taxonomy: "Saturation:ConnectionPool"
+    pattern_type: "exact"
+    error_pattern: "QueuePool limit"
+    affected_services: []
+    severity: "P0"
+    root_cause_narrative: >
+      The SQLAlchemy QueuePool reached its hard connection limit, causing all
+      subsequent database requests to queue indefinitely. This is typically
+      triggered by a leaked transaction — a database session that was opened
+      but never explicitly closed (missing finally/close block) — combined
+      with a sudden spike in traffic that exhausted remaining idle connections.
+      The pool starvation cascades upstream, producing HTTP 500 / 503 errors
+      in any service whose request path touches the database.
+    remediation_steps:
+      - order: 1
+        action: "Terminate all long-running database transactions open for more than 5 minutes."
+        environment: "kubectl"
+        command: "kubectl exec -n prod deployment/{service} -- psql -c \"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE query_start < now() - interval '5 minutes';\""
+        risk: "medium"
+        validation_check: "db_connections < 80"
+      - order: 2
+        action: "Rolling restart the affected service to drain the exhausted connection pool."
+        environment: "kubectl"
+        command: "kubectl rollout restart deployment/{service} -n prod"
+        risk: "medium"
+        validation_check: "db_connections < 20"
+    rollback_command: "kubectl rollout undo deployment/{service} -n prod"
+    validation_check: "db_connections < 20"
+    confidence_score: 0.92
+    data_source: "SRE-Curated-Seed-v1"
+    version: 1
+
+  # -------------------------------------------------------------------------
+  # KB-002: OOMKilled — Exit Code 137
+  # -------------------------------------------------------------------------
+  - entry_id: "kb-002"
+    incident_taxonomy: "Errors:OOM"
+    pattern_type: "exact"
+    error_pattern: "Exit Code 137"
+    affected_services: []
+    severity: "P1"
+    root_cause_narrative: >
+      One or more pods terminated with exit code 137 (SIGKILL from the Linux
+      OOM killer), indicating that the container's memory consumption exceeded
+      its configured resource limit. This can be caused by: (a) a genuine
+      memory leak in application code, (b) an under-provisioned memory limit
+      that does not match the application's working set, or (c) a noisy
+      neighbour on the same node exhausting shared memory. Kubernetes then
+      evicts and restarts the pod, potentially entering a CrashLoopBackOff
+      state if the root cause is not resolved before the restart backoff timer
+      expires.
+    remediation_steps:
+      - order: 1
+        action: "Inspect the pod's current memory limits and recent resource usage."
+        environment: "kubectl"
+        command: "kubectl top pod -n prod -l app={service} --sort-by=memory"
+        risk: "low"
+        validation_check: "memory_utilization < 80"
+      - order: 2
+        action: "Temporarily increase memory limit by 50% to stop OOMKill restart loop."
+        environment: "kubectl"
+        command: "kubectl set resources deployment/{service} -n prod --limits=memory=2Gi"
+        risk: "medium"
+        validation_check: "memory_utilization < 80"
+      - order: 3
+        action: "Rolling restart to ensure pods start clean under the new limit."
+        environment: "kubectl"
+        command: "kubectl rollout restart deployment/{service} -n prod"
+        risk: "low"
+        validation_check: "memory_utilization < 80"
+    rollback_command: "kubectl rollout undo deployment/{service} -n prod"
+    validation_check: "memory_utilization < 80"
+    confidence_score: 0.88
+    data_source: "SRE-Curated-Seed-v1"
+    version: 1
+
+  # -------------------------------------------------------------------------
+  # KB-003: DNS NXDOMAIN failure
+  # -------------------------------------------------------------------------
+  - entry_id: "kb-003"
+    incident_taxonomy: "Errors:DNS"
+    pattern_type: "exact"
+    error_pattern: "NXDOMAIN"
+    affected_services: []
+    severity: "P1"
+    root_cause_narrative: >
+      DNS resolution failures with NXDOMAIN responses indicate that one or
+      more upstream hostnames cannot be resolved by the cluster's CoreDNS
+      service. Common causes are: a misconfigured or deleted Kubernetes
+      Service whose DNS record was cached then invalidated, a CoreDNS
+      ConfigMap update that introduced a forwarding loop, or a temporary
+      upstream DNS provider outage. Services attempting to resolve the
+      affected hostname will receive connection-refused or timeout errors
+      on every request, resulting in elevated HTTP 5xx rates.
+    remediation_steps:
+      - order: 1
+        action: "Verify CoreDNS pods are running and not in a restart loop."
+        environment: "kubectl"
+        command: "kubectl get pods -n kube-system -l k8s-app=kube-dns"
+        risk: "low"
+        validation_check: "dns_latency < 50"
+      - order: 2
+        action: "Force a rolling restart of CoreDNS to flush stale cache and reload ConfigMap."
+        environment: "kubectl"
+        command: "kubectl rollout restart deployment/coredns -n kube-system"
+        risk: "medium"
+        validation_check: "dns_latency < 50"
+      - order: 3
+        action: "Verify the affected service's DNS record resolves correctly after CoreDNS restart."
+        environment: "kubectl"
+        command: "kubectl exec -n prod deployment/{service} -- nslookup {service}.prod.svc.cluster.local"
+        risk: "low"
+        validation_check: "dns_latency < 50"
+    rollback_command: "kubectl rollout undo deployment/coredns -n kube-system"
+    validation_check: "dns_latency < 50"
+    confidence_score: 0.85
+    data_source: "SRE-Curated-Seed-v1"
+    version: 1
+
+  # -------------------------------------------------------------------------
+  # KB-004: High HTTP 5xx error rate (regex)
+  # -------------------------------------------------------------------------
+  - entry_id: "kb-004"
+    incident_taxonomy: "Errors:HTTP_500"
+    pattern_type: "regex"
+    error_pattern: "error[_ ]rate.*?([5-9][0-9]|100)\\s*%"
+    affected_services: []
+    severity: "P1"
+    root_cause_narrative: >
+      The service is returning HTTP 5xx errors at a rate above 5%, indicating
+      a systemic failure in request handling. High 5xx rates are typically
+      caused by: an unhandled exception in a recently deployed code change,
+      a downstream dependency (database, cache, or upstream API) being
+      unavailable, or resource exhaustion (CPU, memory, file descriptors)
+      preventing the service from processing requests. The first step is to
+      correlate the error spike with recent deployments and downstream
+      dependency health.
+    remediation_steps:
+      - order: 1
+        action: "Check recent deployment history to identify if a code change triggered the spike."
+        environment: "kubectl"
+        command: "kubectl rollout history deployment/{service} -n prod"
+        risk: "low"
+        validation_check: "error_rate < 5"
+      - order: 2
+        action: "Roll back to the previous stable deployment revision."
+        environment: "kubectl"
+        command: "kubectl rollout undo deployment/{service} -n prod"
+        risk: "medium"
+        validation_check: "error_rate < 1"
+    rollback_command: "kubectl rollout undo deployment/{service} -n prod"
+    validation_check: "error_rate < 1"
+    confidence_score: 0.82
+    data_source: "SRE-Curated-Seed-v1"
+    version: 1
+
+  # -------------------------------------------------------------------------
+  # KB-005: Disk full
+  # -------------------------------------------------------------------------
+  - entry_id: "kb-005"
+    incident_taxonomy: "Saturation:Disk"
+    pattern_type: "exact"
+    error_pattern: "No space left on device"
+    affected_services: []
+    severity: "P1"
+    root_cause_narrative: >
+      The pod's writable filesystem or an attached persistent volume has
+      reached 100% capacity. Kubernetes pods write logs, temporary files,
+      and application data to their local filesystem. If log rotation is
+      misconfigured or a data processing job is writing unexpectedly large
+      files, the filesystem fills, causing write operations to fail with
+      ENOSPC. This affects any component that writes to disk — databases,
+      log aggregators, message queue brokers, and application servers.
+    remediation_steps:
+      - order: 1
+        action: "Identify the largest consumers of disk space in the pod."
+        environment: "kubectl"
+        command: "kubectl exec -n prod deployment/{service} -- df -h && du -sh /var/log/* 2>/dev/null | sort -rh | head -20"
+        risk: "low"
+        validation_check: null
+      - order: 2
+        action: "Force log rotation and delete stale logs older than 24 hours."
+        environment: "kubectl"
+        command: "kubectl exec -n prod deployment/{service} -- find /var/log -name '*.log' -mtime +1 -delete"
+        risk: "medium"
+        validation_check: null
+      - order: 3
+        action: "Expand the persistent volume claim by 20GB if using a dynamic provisioner."
+        environment: "kubectl"
+        command: "kubectl patch pvc {service}-data -n prod -p '{\"spec\":{\"resources\":{\"requests\":{\"storage\":\"20Gi\"}}}}'"
+        risk: "medium"
+        validation_check: null
+    rollback_command: "kubectl rollout undo deployment/{service} -n prod"
+    validation_check: null
+    confidence_score: 0.80
+    data_source: "SRE-Curated-Seed-v1"
+    version: 1
+
+  # -------------------------------------------------------------------------
+  # KB-006: TLS certificate expiry
+  # -------------------------------------------------------------------------
+  - entry_id: "kb-006"
+    incident_taxonomy: "Errors:TLS"
+    pattern_type: "exact"
+    error_pattern: "certificate has expired"
+    affected_services: []
+    severity: "P1"
+    root_cause_narrative: >
+      A TLS certificate used by the service has expired, causing all HTTPS
+      connections to the affected endpoint to fail with a TLS handshake error.
+      Certificate expiry is typically caused by a failed automatic renewal in
+      cert-manager (Letsencrypt rate limit, DNS01 challenge failure, or
+      missing RBAC permissions), or a manually managed certificate that was
+      not renewed on schedule. Downstream clients will receive
+      x509 certificate has expired or is not yet valid errors.
+    remediation_steps:
+      - order: 1
+        action: "Identify the expired certificate and its issuer via cert-manager."
+        environment: "kubectl"
+        command: "kubectl get certificate -n prod && kubectl describe certificate {service}-tls -n prod"
+        risk: "low"
+        validation_check: null
+      - order: 2
+        action: "Force cert-manager to immediately renew the expired certificate."
+        environment: "kubectl"
+        command: "kubectl annotate certificate {service}-tls -n prod cert-manager.io/issuer-name- && kubectl patch certificate {service}-tls -n prod --type=merge -p '{\"spec\":{\"renewBefore\":\"1h\"}}'"
+        risk: "medium"
+        validation_check: null
+      - order: 3
+        action: "Restart the ingress controller to pick up the renewed certificate."
+        environment: "kubectl"
+        command: "kubectl rollout restart deployment/ingress-nginx-controller -n ingress-nginx"
+        risk: "medium"
+        validation_check: null
+    rollback_command: "kubectl rollout undo deployment/ingress-nginx-controller -n ingress-nginx"
+    validation_check: null
+    confidence_score: 0.87
+    data_source: "SRE-Curated-Seed-v1"
+    version: 1
+
+  # -------------------------------------------------------------------------
+  # KB-007: Redis OOM / maxmemory eviction
+  # -------------------------------------------------------------------------
+  - entry_id: "kb-007"
+    incident_taxonomy: "Errors:OOM"
+    pattern_type: "exact"
+    error_pattern: "OOM command not allowed"
+    affected_services: []
+    severity: "P1"
+    root_cause_narrative: >
+      The Redis instance reached its configured maxmemory limit and the
+      eviction policy rejected new write commands with OOM command not allowed
+      when used memory > maxmemory. This occurs when the cache working set
+      grows beyond the allocated memory, typically caused by a missing TTL
+      on a high-cardinality key pattern, a cache stampede following a cold
+      start, or an unexpected increase in stored object sizes. Services
+      relying on Redis for session state or rate limiting will fail.
+    remediation_steps:
+      - order: 1
+        action: "Check current Redis memory usage and eviction statistics."
+        environment: "kubectl"
+        command: "kubectl exec -n prod deployment/{service} -- redis-cli INFO memory | grep -E 'used_memory_human|maxmemory_human|evicted_keys'"
+        risk: "low"
+        validation_check: null
+      - order: 2
+        action: "Temporarily increase Redis maxmemory to 4GB to unblock writes."
+        environment: "kubectl"
+        command: "kubectl exec -n prod deployment/{service} -- redis-cli CONFIG SET maxmemory 4gb"
+        risk: "medium"
+        validation_check: null
+      - order: 3
+        action: "Flush the most expensive key namespace to free memory (use with caution)."
+        environment: "kubectl"
+        command: "kubectl exec -n prod deployment/{service} -- redis-cli --scan --pattern 'cache:*' | xargs redis-cli DEL"
+        risk: "high"
+        validation_check: null
+    rollback_command: "kubectl exec -n prod deployment/{service} -- redis-cli CONFIG SET maxmemory 2gb"
+    validation_check: null
+    confidence_score: 0.78
+    data_source: "SRE-Curated-Seed-v1"
+    version: 1
+
+  # -------------------------------------------------------------------------
+  # KB-008: Rate limiting (HTTP 429)
+  # -------------------------------------------------------------------------
+  - entry_id: "kb-008"
+    incident_taxonomy: "Traffic:RateLimit"
+    pattern_type: "exact"
+    error_pattern: "429 Too Many Requests"
+    affected_services: []
+    severity: "P2"
+    root_cause_narrative: >
+      The service is being rate-limited by an upstream dependency or API
+      gateway, receiving HTTP 429 Too Many Requests responses. This is
+      typically caused by a sudden traffic spike (legitimate or from a
+      misconfigured retry loop with no exponential backoff), a bug
+      introducing tight loops of API calls, or hitting a shared rate limit
+      across multiple instances without coordinated throttling. The service
+      should implement exponential backoff with jitter on 429 responses.
+    remediation_steps:
+      - order: 1
+        action: "Scale down the number of replicas to reduce outbound request rate."
+        environment: "kubectl"
+        command: "kubectl scale deployment/{service} -n prod --replicas=2"
+        risk: "medium"
+        validation_check: "error_rate < 5"
+      - order: 2
+        action: "Verify that the retry configuration includes exponential backoff."
+        environment: "kubectl"
+        command: "kubectl describe configmap {service}-config -n prod | grep -i retry"
+        risk: "low"
+        validation_check: null
+    rollback_command: "kubectl scale deployment/{service} -n prod --replicas=5"
+    validation_check: "error_rate < 1"
+    confidence_score: 0.75
+    data_source: "SRE-Curated-Seed-v1"
+    version: 1
+
+  # -------------------------------------------------------------------------
+  # KB-009: CrashLoopBackOff
+  # -------------------------------------------------------------------------
+  - entry_id: "kb-009"
+    incident_taxonomy: "Errors:CrashLoop"
+    pattern_type: "exact"
+    error_pattern: "CrashLoopBackOff"
+    affected_services: []
+    severity: "P1"
+    root_cause_narrative: >
+      One or more pods are in CrashLoopBackOff state, indicating that the
+      container process is repeatedly crashing within its restart policy
+      backoff window. Common causes are: an unhandled exception at startup
+      (missing required environment variable, unreachable dependency, or
+      bad configuration value), a resource limit too low to start the JVM/
+      Node process, or a liveness probe failing before the application is
+      ready. Kubernetes exponentially backs off restarts, so the pod will
+      become increasingly unavailable over time without intervention.
+    remediation_steps:
+      - order: 1
+        action: "Inspect the crash logs from the most recently failed container."
+        environment: "kubectl"
+        command: "kubectl logs -n prod deployment/{service} --previous --tail=100"
+        risk: "low"
+        validation_check: null
+      - order: 2
+        action: "Describe the pod to check for OOMKilled status, probe failures, or missing secrets."
+        environment: "kubectl"
+        command: "kubectl describe pod -n prod -l app={service} | tail -50"
+        risk: "low"
+        validation_check: null
+      - order: 3
+        action: "Roll back to the previous stable deployment to stop the crash loop."
+        environment: "kubectl"
+        command: "kubectl rollout undo deployment/{service} -n prod"
+        risk: "medium"
+        validation_check: "error_rate < 5"
+    rollback_command: "kubectl rollout undo deployment/{service} -n prod"
+    validation_check: "error_rate < 5"
+    confidence_score: 0.84
+    data_source: "SRE-Curated-Seed-v1"
+    version: 1
+
+  # -------------------------------------------------------------------------
+  # KB-010: Java heap OutOfMemoryError
+  # -------------------------------------------------------------------------
+  - entry_id: "kb-010"
+    incident_taxonomy: "Errors:OOM"
+    pattern_type: "exact"
+    error_pattern: "java.lang.OutOfMemoryError"
+    affected_services: []
+    severity: "P0"
+    root_cause_narrative: >
+      The JVM threw java.lang.OutOfMemoryError, indicating the Java heap
+      space is exhausted. This is distinct from the Linux OOM kill (Exit
+      Code 137): the JVM manages its own heap and will throw this exception
+      before the OS OOM killer fires. Causes include a memory leak (objects
+      being held in long-lived collections), an unexpectedly large data set
+      being loaded into memory, or an insufficiently sized -Xmx heap setting
+      for the current workload. The pod will typically become unresponsive
+      and eventually trigger its liveness probe failure restart.
+    remediation_steps:
+      - order: 1
+        action: "Immediately restart the service to restore availability."
+        environment: "kubectl"
+        command: "kubectl rollout restart deployment/{service} -n prod"
+        risk: "low"
+        validation_check: "memory_utilization < 85"
+      - order: 2
+        action: "Increase the JVM heap size via the JAVA_OPTS environment variable."
+        environment: "kubectl"
+        command: "kubectl set env deployment/{service} -n prod JAVA_OPTS='-Xms1g -Xmx4g -XX:+UseG1GC'"
+        risk: "medium"
+        validation_check: "memory_utilization < 85"
+    rollback_command: "kubectl rollout undo deployment/{service} -n prod"
+    validation_check: "memory_utilization < 85"
+    confidence_score: 0.90
+    data_source: "SRE-Curated-Seed-v1"
+    version: 1
+
+  # -------------------------------------------------------------------------
+  # KB-011: Deployment ProgressDeadlineExceeded
+  # -------------------------------------------------------------------------
+  - entry_id: "kb-011"
+    incident_taxonomy: "Errors:DeploymentStuck"
+    pattern_type: "exact"
+    error_pattern: "ProgressDeadlineExceeded"
+    affected_services: []
+    severity: "P1"
+    root_cause_narrative: >
+      The Kubernetes deployment controller could not complete a rollout within
+      its progressDeadlineSeconds window, marking the deployment as stalled
+      with ProgressDeadlineExceeded. This is commonly caused by: new pods
+      failing their readiness probes (application not healthy on the new
+      version), insufficient cluster capacity to schedule the new pods
+      (CPU / memory resource requests exceed available node capacity), or
+      an image pull failure (wrong tag, private registry auth expiry, or
+      rate limiting on Docker Hub).
+    remediation_steps:
+      - order: 1
+        action: "Inspect the rollout status and failed pod events."
+        environment: "kubectl"
+        command: "kubectl rollout status deployment/{service} -n prod && kubectl describe deployment {service} -n prod | tail -30"
+        risk: "low"
+        validation_check: null
+      - order: 2
+        action: "Roll back to the previous working revision to restore service availability."
+        environment: "kubectl"
+        command: "kubectl rollout undo deployment/{service} -n prod"
+        risk: "medium"
+        validation_check: "error_rate < 5"
+    rollback_command: "kubectl rollout undo deployment/{service} -n prod"
+    validation_check: "error_rate < 5"
+    confidence_score: 0.91
+    data_source: "SRE-Curated-Seed-v1"
+    version: 1
+
+  # -------------------------------------------------------------------------
+  # KB-012: Pod eviction (resource pressure)
+  # -------------------------------------------------------------------------
+  - entry_id: "kb-012"
+    incident_taxonomy: "Saturation:Memory"
+    pattern_type: "exact"
+    error_pattern: "Evicted"
+    affected_services: []
+    severity: "P1"
+    root_cause_narrative: >
+      Kubernetes evicted one or more pods due to node-level resource pressure
+      (typically memory pressure signalled by the MemoryPressure node
+      condition). The kubelet's eviction manager terminates pods with no
+      resource requests defined (BestEffort QoS) or those exceeding their
+      resource requests (Burstable QoS) to reclaim capacity for system and
+      Guaranteed QoS pods. Services without explicit resource requests are
+      at highest risk of eviction during peak load.
+    remediation_steps:
+      - order: 1
+        action: "Identify the evicting node and its current resource pressure conditions."
+        environment: "kubectl"
+        command: "kubectl describe node | grep -A5 'Conditions:' | grep -E 'MemoryPressure|DiskPressure'"
+        risk: "low"
+        validation_check: null
+      - order: 2
+        action: "Cordon the pressured node to prevent new pod scheduling."
+        environment: "kubectl"
+        command: "kubectl cordon <node-name>"
+        risk: "medium"
+        validation_check: null
+      - order: 3
+        action: "Drain the node gracefully to reschedule pods to healthy nodes."
+        environment: "kubectl"
+        command: "kubectl drain <node-name> --ignore-daemonsets --delete-emptydir-data --grace-period=30"
+        risk: "high"
+        validation_check: "memory_utilization < 80"
+    rollback_command: "kubectl uncordon <node-name>"
+    validation_check: "memory_utilization < 80"
+    confidence_score: 0.80
+    data_source: "SRE-Curated-Seed-v1"
+    version: 1
+
+  # -------------------------------------------------------------------------
+  # KB-013: CoreDNS rate limiting
+  # -------------------------------------------------------------------------
+  - entry_id: "kb-013"
+    incident_taxonomy: "Errors:DNS"
+    pattern_type: "exact"
+    error_pattern: "CoreDNS rate limiting"
+    affected_services: []
+    severity: "P1"
+    root_cause_narrative: >
+      CoreDNS is applying rate limiting to DNS queries, dropping resolution
+      requests from pods that exceed the configured query-per-second threshold.
+      This is typically caused by a misconfigured application making DNS
+      lookups in a tight loop (e.g. re-resolving an internal service on every
+      request instead of caching the result), or by the cluster's CoreDNS
+      instance being under-provisioned for the cluster size. Affected services
+      will intermittently fail to resolve upstream service names.
+    remediation_steps:
+      - order: 1
+        action: "Scale CoreDNS to add capacity and reduce per-instance load."
+        environment: "kubectl"
+        command: "kubectl scale deployment/coredns -n kube-system --replicas=4"
+        risk: "low"
+        validation_check: "dns_latency < 50"
+      - order: 2
+        action: "Patch the CoreDNS ConfigMap to increase the rate limit threshold."
+        environment: "kubectl"
+        command: "kubectl patch configmap coredns -n kube-system --type=merge -p '{\"data\":{\"Corefile\":\".:53 {\\n  errors\\n  health\\n  ready\\n  kubernetes cluster.local in-addr.arpa ip6.arpa {\\n    pods insecure\\n    fallthrough in-addr.arpa ip6.arpa\\n  }\\n  prometheus :9153\\n  forward . /etc/resolv.conf\\n  cache 30\\n  loop\\n  reload\\n  loadbalance\\n}\\n\"}}'"
+        risk: "medium"
+        validation_check: "dns_latency < 50"
+    rollback_command: "kubectl rollout undo deployment/coredns -n kube-system"
+    validation_check: "dns_latency < 50"
+    confidence_score: 0.77
+    data_source: "SRE-Curated-Seed-v1"
+    version: 1
+
+  # -------------------------------------------------------------------------
+  # KB-014: Database connection timeout (regex)
+  # -------------------------------------------------------------------------
+  - entry_id: "kb-014"
+    incident_taxonomy: "Latency:Database"
+    pattern_type: "regex"
+    error_pattern: "connection.*timed?\\s*out"
+    affected_services: []
+    severity: "P1"
+    root_cause_narrative: >
+      Database connection attempts are timing out before a connection can be
+      established. This indicates the database server is either unreachable
+      (network policy change, pod not ready), overwhelmed and not accepting
+      new connections within the configured timeout window, or that the
+      connection pool is saturated and wait-for-connection timeout is
+      triggering. Unlike pool exhaustion (QueuePool limit), this error
+      typically means the TCP handshake itself is failing or the database
+      is accepting the connection but not responding.
+    remediation_steps:
+      - order: 1
+        action: "Verify the database pod is running and its service endpoints are healthy."
+        environment: "kubectl"
+        command: "kubectl get pod,svc,endpoints -n prod -l app=postgresql"
+        risk: "low"
+        validation_check: "db_connections < 80"
+      - order: 2
+        action: "Rolling restart the affected service to reset stale connection handles."
+        environment: "kubectl"
+        command: "kubectl rollout restart deployment/{service} -n prod"
+        risk: "medium"
+        validation_check: "db_connections < 20"
+    rollback_command: "kubectl rollout undo deployment/{service} -n prod"
+    validation_check: "db_connections < 20"
+    confidence_score: 0.80
+    data_source: "SRE-Curated-Seed-v1"
+    version: 1
+
+  # -------------------------------------------------------------------------
+  # KB-015: CPU throttling (regex)
+  # -------------------------------------------------------------------------
+  - entry_id: "kb-015"
+    incident_taxonomy: "Saturation:CPU"
+    pattern_type: "regex"
+    error_pattern: "cpu.*throttl"
+    affected_services: []
+    severity: "P2"
+    root_cause_narrative: >
+      The container's CPU usage is being throttled by the Linux CFS (Completely
+      Fair Scheduler) because it is consuming more CPU than its configured
+      cpu_limit allows. CPU throttling manifests as increased latency (p99
+      request durations) without a corresponding increase in error rate,
+      as the process is slowed rather than killed. This is common in
+      Java/Node applications with tight CPU limits, or during traffic spikes
+      that push CPU-bound workloads above their quota.
+    remediation_steps:
+      - order: 1
+        action: "Check current CPU utilisation and throttling ratio for the service."
+        environment: "kubectl"
+        command: "kubectl top pod -n prod -l app={service} --sort-by=cpu"
+        risk: "low"
+        validation_check: "cpu_utilization < 80"
+      - order: 2
+        action: "Increase the CPU limit to reduce throttling."
+        environment: "kubectl"
+        command: "kubectl set resources deployment/{service} -n prod --limits=cpu=2000m --requests=cpu=500m"
+        risk: "medium"
+        validation_check: "cpu_utilization < 80"
+    rollback_command: "kubectl rollout undo deployment/{service} -n prod"
+    validation_check: "cpu_utilization < 80"
+    confidence_score: 0.76
+    data_source: "SRE-Curated-Seed-v1"
+    version: 1

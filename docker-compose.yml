@@ -23,6 +23,14 @@ services:
     volumes:
       - redis_data:/data
 
+  qdrant:
+    image: qdrant/qdrant:latest
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant_storage:/qdrant/storage
+
   api:
     build: .
     command: uvicorn api.main:app --host 0.0.0.0 --port 8080 --reload
@@ -33,10 +41,13 @@ services:
       - REDIS_URL=redis://redis:6379/0
       - CELERY_BROKER_URL=redis://redis:6379/0
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - QDRANT_URL=http://qdrant:6333
     depends_on:
       postgres:
         condition: service_healthy
       redis:
+        condition: service_started
+      qdrant:
         condition: service_started
     volumes:
       - .:/app
@@ -49,10 +60,13 @@ services:
       - REDIS_URL=redis://redis:6379/0
       - CELERY_BROKER_URL=redis://redis:6379/0
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - QDRANT_URL=http://qdrant:6333
     depends_on:
       postgres:
         condition: service_healthy
       redis:
+        condition: service_started
+      qdrant:
         condition: service_started
     volumes:
       - .:/app
@@ -60,3 +74,4 @@ services:
 volumes:
   postgres_data:
   redis_data:
+  qdrant_storage:

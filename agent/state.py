@@ -22,6 +22,7 @@ Three concerns are handled here:
 from __future__ import annotations
 
 from typing import Annotated, Literal
+from uuid import uuid4
 
 from langgraph.graph.message import add_messages
 from langchain_core.messages import AnyMessage
@@ -239,6 +240,135 @@ class RemediationPlan(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Knowledge Base Schema
+# ---------------------------------------------------------------------------
+
+
+class KBRemediationStep(BaseModel):
+    """
+    A single remediation step stored in the knowledge base.
+
+    Mirrors RemediationStep but adds ``environment`` (execution target) and
+    ``validation_check`` (PromQL / Datadog query to verify the step resolved
+    the issue before proceeding to the next one).
+    """
+
+    order: int = Field(..., ge=1, description="Execution order (1-indexed).")
+    action: str = Field(..., min_length=1, description="Human-readable action description.")
+    environment: Literal["shell", "kubectl", "psql"] = Field(
+        default="kubectl",
+        description="Execution environment for this step.",
+    )
+    command: str | None = Field(
+        default=None,
+        description="Exact shell / kubectl / psql command. Supports {service} placeholder.",
+    )
+    risk: Literal["low", "medium", "high"] = Field(default="low")
+    validation_check: str | None = Field(
+        default=None,
+        description="PromQL or Datadog query to verify this step resolved the issue.",
+    )
+
+
+class KBEntry(BaseModel):
+    """
+    A single knowledge-base entry mapping an error pattern to a root cause
+    and a set of deterministic remediation actions.
+
+    This is the ground-truth record that grounds every LLM inference in AIRS.
+    Entries are loaded from ``data/kb_seed.yaml`` and stored in SQLite
+    (or PostgreSQL in production).
+
+    Pattern matching priority (highest to lowest):
+      exact   — substring containment; highest confidence.
+      regex   — re.search against combined alert + telemetry text.
+      semantic — keyword Jaccard + optional Groq LLM judge.
+    """
+
+    entry_id: str = Field(
+        default_factory=lambda: str(uuid4()),
+        description="Unique identifier for version control and audit trails.",
+    )
+    incident_taxonomy: str = Field(
+        ...,
+        description=(
+            "Golden Signal / USE / RED classification. "
+            "Format: '<Signal>:<SubType>' e.g. 'Saturation:Memory', 'Errors:HTTP_500'."
+        ),
+    )
+    pattern_type: Literal["exact", "regex", "semantic"] = Field(
+        ...,
+        description="Determines the matching engine: exact string, regex, or keyword-semantic.",
+    )
+    error_pattern: str = Field(
+        ...,
+        description="Verbatim string (exact), regex pattern, or keyword description (semantic).",
+    )
+    affected_services: list[str] = Field(
+        default_factory=list,
+        description="Microservices / components explicitly impacted by this pattern.",
+    )
+    severity: Literal["P0", "P1", "P2", "P3"]
+    root_cause_narrative: str = Field(
+        ...,
+        min_length=10,
+        description="Human-readable causal explanation. Injected into plan_node prompt as ground truth.",
+    )
+    remediation_steps: list[KBRemediationStep] = Field(
+        ...,
+        min_length=1,
+        description="Ordered, atomic remediation actions.",
+    )
+    rollback_command: str = Field(
+        ...,
+        description="Single command to fully revert all remediation changes. Supports {service} placeholder.",
+    )
+    validation_check: str | None = Field(
+        default=None,
+        description="Top-level PromQL / Datadog query to confirm full incident resolution.",
+    )
+    confidence_score: float = Field(
+        default=0.80,
+        ge=0.0,
+        le=1.0,
+        description="Historical success rate of this entry (updated by execute_node feedback loop).",
+    )
+    data_source: str = Field(
+        default="SRE-Curated-Seed-v1",
+        description="Origin of this entry (e.g. 'Postmortem-Jira-1024', 'SRE-Human-Input').",
+    )
+    version: int = Field(default=1, description="Schema version for KB drift tracking.")
+    last_validated: str | None = Field(
+        default=None,
+        description="ISO 8601 timestamp of the most recent successful production execution.",
+    )
+
+
+class KBRetrievalResult(BaseModel):
+    """
+    The output of a KB lookup operation, written to state["kb_result"] by kb_lookup_node.
+
+    ``retrieval_score`` drives the confidence-gated routing logic:
+      >= KB_EXACT_BYPASS_THRESHOLD  →  bypass_llm=True  (full automation: skip to execute)
+      >= KB_RAG_THRESHOLD           →  inject as RAG context into plan_node
+      <  KB_RAG_THRESHOLD           →  read-only diagnostic mode (LLM generates no commands)
+    """
+
+    entry: KBEntry | None = Field(default=None)
+    retrieval_score: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+        description="RRF-combined match score from the hybrid retrieval engine.",
+    )
+    match_type: Literal["exact", "regex", "semantic", "none"] = Field(default="none")
+    bypass_llm: bool = Field(
+        default=False,
+        description="True when retrieval_score >= KB_EXACT_BYPASS_THRESHOLD.",
+    )
+
+
+# ---------------------------------------------------------------------------
 # LangGraph State
 # ---------------------------------------------------------------------------
 
@@ -318,6 +448,20 @@ class GraphState(dict):
     from the raw telemetry by the extract_node. Passed to the RCA plan_node.
     """
 
+    kb_result: KBRetrievalResult | None
+    """
+    The result of the KB lookup performed by kb_lookup_node.
+    Written once after triage; read by plan_node for RAG injection and by
+    the orchestrator router for bypass / escalate / investigate routing.
+    """
+
+    faithfulness_score: float | None
+    """
+    Cross-validation score (0.0–1.0) measuring how closely plan_node's
+    generated output adheres to the retrieved KB entry.  Values below 0.5
+    trigger a high-risk flag, forcing HITL review regardless of plan content.
+    """
+
     # ------------------------------------------------------------------ #
     #  RCA & Remediation outputs                                           #
     # ------------------------------------------------------------------ #
@@ -382,4 +526,6 @@ def make_initial_state(raw_alert: dict) -> dict:
         "is_approved": False,
         "postmortem": "",
         "_live_tool_sequence": [],  # Accumulates LLM tool calls for cache write-back
+        "kb_result": None,           # Written by kb_lookup_node
+        "faithfulness_score": None,  # Written by plan_node cross-validation
     }

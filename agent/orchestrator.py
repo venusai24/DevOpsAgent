@@ -5,14 +5,22 @@ Wires all AIRS LangGraph nodes into a compiled, checkpointed StateGraph.
 
 Architecture (ImplementationPlan.md Section 5):
   ┌─────────────┐
-  │  START       │
-  └──────┬───────┘
-         ▼
-  ┌─────────────┐
-  │ triage_node │  → classify severity (P0-P3)
-  └──────┬───────┘
-         │ conditional: P0 → escalate_node, else → investigate_node
-         ▼
+   │  START       │
+   └──────┬───────┘
+          ▼
+   ┌─────────────┐
+   │ triage_node │  → classify severity (P0-P3)
+   └──────┬───────┘
+          │ always
+          ▼
+   ┌───────────────┐
+   │ kb_lookup_node│  → hybrid KB lookup (exact/regex/semantic)
+   └──────┬────────┘
+          │ conditional: _route_after_kb_lookup
+          │   "execute"     ─── score ≥ 0.95: EXACT BYPASS (skip LLM pipeline)
+          │   "escalate"    ─── P0 severity: page on-call
+          │   "investigate" ─── normal ReAct investigation
+          ▼
   ┌──────────────────┐
   │ investigate_node │◄─────────────────────────────────┐
   └──────┬───────────┘                                  │
@@ -81,6 +89,7 @@ from agent.nodes import (
     plan_node,
     should_continue_investigation,
     triage_node,
+    kb_lookup_node,
 )
 from agent.state import GraphState, RemediationPlan
 
@@ -247,6 +256,7 @@ async def execute_node(state: dict) -> dict:
 
     # --- Simulate execution of each kubectl / shell step ---
     executed_steps: list[str] = []
+    execution_succeeded = True
     if plan:
         for step in sorted(plan.steps, key=lambda s: s.order):
             log_line = f"✅ Step {step.order}: {step.action}"
@@ -255,6 +265,7 @@ async def execute_node(state: dict) -> dict:
                 # Apply Guardrails
                 if not is_safe_command(step.command):
                     log_line += f"\n   `[BLOCKED BY GUARDRAIL] {step.command}`"
+                    execution_succeeded = False
                 else:
                     # Apply Kubernetes SDK
                     k8s_result = apply_kubectl_command(step.command)
@@ -262,6 +273,20 @@ async def execute_node(state: dict) -> dict:
                     
             executed_steps.append(log_line)
             logger.info("[execute_node] %s", log_line)
+
+    # --- Closed-loop KB feedback: update confidence_score based on outcome ---
+    kb_result = state.get("kb_result")
+    if kb_result and kb_result.entry:
+        try:
+            from agent.kb.store import kb_update_confidence
+            await kb_update_confidence(kb_result.entry.entry_id, success=execution_succeeded)
+            logger.info(
+                "[execute_node] KB confidence updated: entry=%s success=%s",
+                kb_result.entry.entry_id,
+                execution_succeeded,
+            )
+        except Exception as exc:
+            logger.warning("[execute_node] KB confidence update failed: %s", exc)
 
     # --- Build postmortem document ---
     postmortem = _build_postmortem(
@@ -316,13 +341,45 @@ async def reject_node(state: dict) -> dict:
 
 def _route_after_triage(state: dict) -> str:
     """
-    After triage_node: P0 → escalate first, all other severities → investigate.
+    After triage_node: always proceed to kb_lookup_node.
+    Kept as a passthrough for compatibility; kb_lookup_node handles all
+    severity-based routing via _route_after_kb_lookup.
+
+    Deprecated: Will be removed once all tests are updated to use kb_lookup.
     """
+    # Retained only as a fallback — orchestrator now routes triage → kb_lookup directly.
+    return "kb_lookup"
+
+
+def _route_after_kb_lookup(state: dict) -> str:
+    """
+    After kb_lookup_node: three-way routing based on KB match score and severity.
+
+    1. bypass_llm=True (exact KB match, score ≥ KB_EXACT_BYPASS_THRESHOLD):
+       Route directly to execute_node.  The plan and is_approved=True are
+       already written to state by kb_lookup_node.
+
+    2. P0 severity (without bypass): Route to escalate_node to page on-call,
+       then escalate → investigate via a fixed edge.
+
+    3. All other cases: Route to investigate_node for the normal ReAct loop.
+    """
+    from agent.state import KBRetrievalResult
+    kb_result: KBRetrievalResult | None = state.get("kb_result")
+
+    if kb_result and kb_result.bypass_llm:
+        logger.info(
+            "[router] KB EXACT BYPASS (score=%.3f) → execute_node",
+            kb_result.retrieval_score,
+        )
+        return "execute"
+
     severity: str = state.get("severity", "")
     if severity == "P0":
         logger.info("[router] P0 detected → escalate_node")
         return "escalate"
-    logger.info("[router] severity=%s → investigate_node", severity)
+
+    logger.info("[router] severity=%s, no bypass → investigate_node", severity)
     return "investigate"
 
 
@@ -512,6 +569,7 @@ def _build_compiled_graph(checkpointer: AsyncSqliteSaver):
     # Register nodes
     # ------------------------------------------------------------------
     graph.add_node("triage", triage_node)
+    graph.add_node("kb_lookup", kb_lookup_node)  # KB grounding gate (new)
     graph.add_node("escalate", escalate_node)
     graph.add_node("investigate", investigate_node)
     graph.add_node("extract", extract_node)
@@ -524,15 +582,17 @@ def _build_compiled_graph(checkpointer: AsyncSqliteSaver):
     # Register edges
     # ------------------------------------------------------------------
 
-    # Entry point
+    # Entry point: always triage first, then KB lookup
     graph.add_edge(START, "triage")
+    graph.add_edge("triage", "kb_lookup")
 
-    # After triage: route by severity
+    # After KB lookup: three-way conditional routing
     graph.add_conditional_edges(
-        "triage",
-        _route_after_triage,
+        "kb_lookup",
+        _route_after_kb_lookup,
         {
-            "escalate": "escalate",
+            "execute": "execute",    # Exact KB bypass: skip full LLM pipeline
+            "escalate": "escalate",  # P0 fast-path (still investigates after)
             "investigate": "investigate",
         },
     )

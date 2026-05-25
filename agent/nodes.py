@@ -22,12 +22,13 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from typing import Any
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_groq import ChatGroq
 
-from agent.state import GraphState, RemediationPlan, RemediationStep, TriageResult
+from agent.state import GraphState, RemediationPlan, RemediationStep, TriageResult, KBRetrievalResult
 from agent.tools import ALL_TOOLS, get_logs, get_metrics
 from agent.json_parser import parse_json_robust
 from agent.playbook_cache import (
@@ -35,6 +36,8 @@ from agent.playbook_cache import (
     record_successful_playbook,
     substitute_service,
 )
+from agent.kb.store import kb_lookup, kb_update_confidence
+from agent.kb.token_dedup import deduplicate_telemetry
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +54,13 @@ Prevents runaway API spend when the LLM is stuck in a tool loop.
 """
 
 _MODEL_NAME: str = os.getenv("GROQ_MODEL", "qwen/qwen3-32b")
+
+_FAITHFULNESS_WARN_THRESHOLD: float = 0.50
+"""
+Faithfulness scores below this value indicate the LLM deviated from the
+retrieved KB entry. The plan's rollback_command is cleared to force the
+zero-trust guardrail to route through reject_node → HITL review.
+"""
 
 # ---------------------------------------------------------------------------
 # LLM factory
@@ -167,6 +177,166 @@ async def triage_node(state: dict) -> dict:
         "triage_result": result,
         "messages": [human_msg, ai_msg],
     }
+
+
+# ---------------------------------------------------------------------------
+# Node: kb_lookup_node
+# ---------------------------------------------------------------------------
+
+
+async def kb_lookup_node(state: dict) -> dict:
+    """
+    Knowledge Base lookup gate — runs after triage_node, before any LLM call.
+
+    Performs a hybrid exact/regex/semantic lookup against the KB store and
+    writes the result to state["kb_result"]. The orchestrator router then
+    reads kb_result to decide whether to:
+
+      bypass_llm=True  (score >= KB_EXACT_BYPASS_THRESHOLD):
+        Build RemediationPlan directly from the KB entry, set is_approved=True,
+        and route straight to execute_node — skipping investigate, extract,
+        plan, and approval entirely.
+
+      score in [KB_RAG_THRESHOLD, KB_EXACT_BYPASS_THRESHOLD):
+        Write kb_result to state so plan_node can inject it as RAG context.
+        Continue normal investigation pipeline.
+
+      score < KB_RAG_THRESHOLD:
+        Write kb_result with match_type='none'. plan_node will operate in
+        read-only diagnostic mode (no kubectl commands generated).
+
+    Reads:
+        state["raw_alert"]     — For alert title and description.
+        state["triage_result"] — For runtime service name substitution.
+        state["severity"]      — Preserved verbatim for downstream routing.
+
+    Writes:
+        state["kb_result"]       — Always written.
+        state["remediation_plan"] — Only on full bypass.
+        state["plan"]             — Only on full bypass.
+        state["is_approved"]      — Set True only on full bypass.
+        state["retry_count"]      — Set to MAX_RETRIES only on full bypass
+                                    to signal the router to skip investigation.
+        state["messages"]         — One informational AIMessage appended.
+    """
+    raw_alert: dict = state.get("raw_alert", {})
+    alert_title: str = raw_alert.get("title", "")
+    alert_description: str = raw_alert.get("description", "")
+
+    triage: TriageResult | None = state.get("triage_result")
+    service: str = (
+        triage.service if triage else raw_alert.get("service", "unknown")
+    )
+
+    logger.info(
+        "[kb_lookup_node] Looking up KB for alert=%r service=%s",
+        alert_title[:80],
+        service,
+    )
+
+    kb_result: KBRetrievalResult = await kb_lookup(
+        alert_title, alert_description
+    )
+
+    updates: dict = {"kb_result": kb_result}
+
+    # ------------------------------------------------------------------
+    # Full bypass: exact KB hit — skip the entire LLM pipeline
+    # ------------------------------------------------------------------
+    if kb_result.bypass_llm and kb_result.entry:
+        entry = kb_result.entry
+
+        logger.info(
+            "[kb_lookup_node] EXACT BYPASS score=%.3f entry=%s taxonomy=%s "
+            "— building plan from KB, skipping LLM pipeline",
+            kb_result.retrieval_score,
+            entry.entry_id,
+            entry.incident_taxonomy,
+        )
+
+        # Convert KBRemediationStep → RemediationStep, substituting {service}
+        steps = [
+            RemediationStep(
+                order=s.order,
+                action=s.action,
+                command=(
+                    s.command.replace("{service}", service)
+                    if s.command
+                    else None
+                ),
+                risk=s.risk,
+            )
+            for s in entry.remediation_steps
+        ]
+
+        plan = RemediationPlan(
+            root_cause=entry.root_cause_narrative,
+            steps=steps,
+            rollback_command=entry.rollback_command.replace("{service}", service),
+            estimated_mttr_minutes=None,
+            postmortem_summary=(
+                f"[KB-GROUNDED ✔] Entry {entry.entry_id} "
+                f"({entry.incident_taxonomy}) matched with score "
+                f"{kb_result.retrieval_score:.2f}. "
+                f"{entry.root_cause_narrative[:250]}"
+            ),
+        )
+
+        plan_md = _render_plan_markdown(plan, service, state.get("severity", ""))
+
+        bypass_msg = AIMessage(
+            content=(
+                f"✅ **KB Exact Bypass** — Entry `{entry.entry_id}` "
+                f"(`{entry.incident_taxonomy}`) matched with score "
+                f"`{kb_result.retrieval_score:.2f}` "
+                f"(threshold `{_settings().KB_EXACT_BYPASS_THRESHOLD}`). "
+                f"Executing verified runbook. LLM investigation pipeline skipped."
+            )
+        )
+
+        updates.update(
+            {
+                "remediation_plan": plan,
+                "plan": plan_md,
+                "is_approved": True,   # Full bypass: no HITL for exact KB hits
+                "retry_count": MAX_RETRIES,  # Signal router to skip investigation
+                "messages": [bypass_msg],
+                "faithfulness_score": 1.0,   # KB is the source of truth
+            }
+        )
+    else:
+        # RAG match or no match — log and let the pipeline continue
+        score_str = f"score={kb_result.retrieval_score:.3f} type={kb_result.match_type}"
+        if kb_result.match_type != "none":
+            logger.info(
+                "[kb_lookup_node] RAG MATCH %s — KB context will be injected into plan_node",
+                score_str,
+            )
+        else:
+            logger.info(
+                "[kb_lookup_node] NO KB MATCH %s — plan_node will use read-only diagnostic mode",
+                score_str,
+            )
+
+        info_msg = AIMessage(
+            content=(
+                f"KB lookup result: {score_str}. "
+                + (
+                    "Injecting KB context into plan."
+                    if kb_result.match_type != "none"
+                    else "No KB match — proceeding in read-only diagnostic mode."
+                )
+            )
+        )
+        updates["messages"] = [info_msg]
+
+    return updates
+
+
+def _settings():
+    """Lazy import of settings to avoid circular import at module load time."""
+    from config import settings
+    return settings
 
 
 # ---------------------------------------------------------------------------
@@ -399,6 +569,12 @@ async def investigate_node(state: dict) -> dict:
         )
         new_telemetry = new_telemetry + section_header + tool_result
 
+        # Deduplicate repeated stack traces to prevent context overflow
+        new_telemetry = deduplicate_telemetry(
+            new_telemetry,
+            max_chars=_settings().KB_MAX_TELEMETRY_CHARS,
+        )
+
         logger.info(
             "[investigate_node] telemetry length=%d chars", len(new_telemetry)
         )
@@ -512,17 +688,34 @@ async def extract_node(state: dict) -> dict:
     Reads the raw telemetry string and explicitly isolates key metrics and errors
     into an XML scratchpad. This mitigates attention hijacking and ensures verbatim
     retention of critical identifiers (like exit codes or WARN logs).
+
+    A token-deduplication pass is applied before the LLM call to guard against
+    context-window overflow during cascading failures where the telemetry string
+    may contain thousands of repeated stack-trace lines.
     """
-    telemetry: str = state.get("telemetry", "No telemetry gathered.")
-    logger.info("[extract_node] Extracting key evidence from telemetry")
+    raw_telemetry: str = state.get("telemetry", "No telemetry gathered.")
+    cfg = _settings()
+
+    # Guard: compress if over the hard char limit before injecting into LLM
+    if len(raw_telemetry) > cfg.KB_MAX_TELEMETRY_CHARS:
+        logger.warning(
+            "[extract_node] Telemetry %d chars exceeds limit %d — deduplicating",
+            len(raw_telemetry),
+            cfg.KB_MAX_TELEMETRY_CHARS,
+        )
+        telemetry = deduplicate_telemetry(raw_telemetry, max_chars=cfg.KB_MAX_TELEMETRY_CHARS)
+    else:
+        telemetry = raw_telemetry
+
+    logger.info("[extract_node] Extracting key evidence from telemetry (%d chars)", len(telemetry))
 
     llm = _make_llm()  # Standard text output, no JSON mode needed
-    
+
     prompt = _EXTRACT_PROMPT_TEMPLATE.format(telemetry=telemetry)
     human_msg = HumanMessage(content=prompt)
 
     response = await llm.ainvoke([human_msg])
-    
+
     extracted_text = response.content
     # Simple extraction of the XML block if present
     if "<extracted_evidence>" in extracted_text:
@@ -594,24 +787,36 @@ async def plan_node(state: dict) -> dict:
     """
     Synthesise all gathered telemetry into a typed RemediationPlan.
 
-    Uses native JSON mode (`bind(response_format={"type": "json_object"})`) and
-    a friendly template string rather than a formal Pydantic JSON schema. This
-    avoids Groq 400 tool_use_failed errors that occur when Qwen-32b interprets
-    a formal schema as a function/tool definition and wraps its output in a
-    tool-call envelope.
+    RAG Grounding (added for KB robustness):
+        If state["kb_result"] contains a match above KB_RAG_THRESHOLD, the
+        KB entry's root_cause_narrative and remediation_steps are injected
+        into the prompt as "Verified Known Pattern" ground truth. The LLM's
+        role shifts from free generator to template instantiator: it fills in
+        runtime-specific values (pod names, timestamps) but must NOT invent
+        new steps or alter commands.
 
-    The zero-trust guardrail (RemediationPlan.is_high_risk) is evaluated
-    here. High-risk plans are logged but not blocked at this stage; blocking
-    occurs in the orchestrator's conditional edge before the approval node.
+    Read-only diagnostic mode:
+        If no KB match is found (score < KB_RAG_THRESHOLD), the prompt
+        explicitly prohibits the LLM from generating kubectl commands.
+        All step.command fields will be null, forcing HITL review.
+
+    Faithfulness cross-validation:
+        After the LLM returns a plan, _cross_validate_plan() scores how
+        closely the generated commands and root cause adhere to the KB entry.
+        If faithfulness < _FAITHFULNESS_WARN_THRESHOLD (0.50), the plan's
+        rollback_command is cleared, triggering is_high_risk=True and routing
+        to reject_node before the HITL approval gate.
 
     Reads:
-        state["triage_result"] — For service / severity.
-        state["raw_alert"]     — For alert title.
-        state["telemetry"]     — Full investigation telemetry string.
+        state["triage_result"]    — For service / severity.
+        state["raw_alert"]        — For alert title.
+        state["extracted_evidence"] — Verbatim evidence from extract_node.
+        state["kb_result"]        — KB retrieval result from kb_lookup_node.
 
     Writes:
         state["plan"]             — Markdown-serialised plan for CLI / Rich.
         state["remediation_plan"] — Typed RemediationPlan Pydantic instance.
+        state["faithfulness_score"] — Cross-validation score (None if no KB match).
         state["messages"]         — Appends HumanMessage (input) + AIMessage.
     """
     triage: TriageResult | None = state.get("triage_result")
@@ -619,24 +824,108 @@ async def plan_node(state: dict) -> dict:
     severity: str = state.get("severity", "P1")
     alert_title: str = state.get("raw_alert", {}).get("title", "Unknown incident")
     extracted_evidence: str = state.get("extracted_evidence", "No evidence extracted.")
+    kb_result: KBRetrievalResult | None = state.get("kb_result")
 
+    cfg = _settings()
     logger.info("[plan_node] Drafting remediation plan for service=%s", service)
 
-    # Bind JSON mode — do NOT inject a formal JSON schema; Qwen treats formal
-    # schemas as function definitions and wraps responses in a tool-call
-    # envelope, causing Groq to return 400 tool_use_failed.
-    llm = _make_llm().bind(response_format={"type": "json_object"})
+    # ------------------------------------------------------------------
+    # Build the KB context section for the prompt
+    # ------------------------------------------------------------------
+    kb_context_section = ""
+    read_only_mode = True  # Default to safe read-only until KB says otherwise
 
+    if kb_result and kb_result.entry and kb_result.retrieval_score >= cfg.KB_RAG_THRESHOLD:
+        read_only_mode = False
+        entry = kb_result.entry
+        kb_steps_text = "\n".join(
+            [
+                f"  {s.order}. [{s.risk.upper()} RISK] {s.action}"
+                + (
+                    f"\n     Command (`{s.environment}`): `{s.command}`"
+                    if s.command
+                    else ""
+                )
+                for s in entry.remediation_steps
+            ]
+        )
+        kb_context_section = (
+            f"## ⚠️ Verified Known Pattern (KB Entry `{entry.entry_id}`)"
+            f" — GROUND TRUTH\n"
+            f"**Taxonomy**: `{entry.incident_taxonomy}`  "
+            f"**Confidence**: {entry.confidence_score:.0%}  "
+            f"**Match score**: {kb_result.retrieval_score:.2f}\n\n"
+            f"**Root Cause (verified)**:\n{entry.root_cause_narrative}\n\n"
+            f"**Verified Remediation Steps**:\n{kb_steps_text}\n\n"
+            f"**Rollback Command**: `{entry.rollback_command}`\n\n"
+            f"⚠️ CRITICAL INSTRUCTION: You MUST derive your `root_cause` and "
+            f"`steps` EXCLUSIVELY from the Verified Known Pattern above.\n"
+            f"Only substitute runtime-specific values (actual pod names, IP addresses, "
+            f"timestamps, transaction IDs) from the Extracted Verbatim Evidence below.\n"
+            f"Do NOT invent new steps. Do NOT change command verbs. "
+            f"Do NOT add steps not present in the Known Pattern.\n"
+        )
+        logger.info(
+            "[plan_node] KB context injected: entry=%s score=%.3f",
+            entry.entry_id, kb_result.retrieval_score,
+        )
+    else:
+        # No KB match — read-only diagnostic mode
+        kb_context_section = (
+            "## ⚠️ No Verified Pattern Found — READ-ONLY DIAGNOSTIC MODE\n"
+            "No matching KB entry was found for this incident pattern.\n\n"
+            "❌ CRITICAL INSTRUCTION: You MUST operate in DIAGNOSTIC-ONLY mode:\n"
+            "- Set `root_cause` to a diagnostic summary of the available evidence ONLY.\n"
+            "- Set ALL `command` fields to `null`. Do NOT suggest any kubectl, shell, or database commands.\n"
+            "- Set `rollback_command` to an empty string.\n"
+            "A human SRE must review and determine the remediation manually.\n"
+        )
+        logger.info("[plan_node] No KB match — operating in read-only diagnostic mode")
+
+    # ------------------------------------------------------------------
+    # Build the full prompt
+    # ------------------------------------------------------------------
     prompt = (
         f"{_PLAN_PROMPT_TEMPLATE.format(service=service, severity=severity, alert_title=alert_title, extracted_evidence=extracted_evidence)}\n\n"
+        f"{kb_context_section}\n"
         f"Respond ONLY with a JSON object matching this exact template:\n"
         f"```\n{_PLAN_JSON_TEMPLATE}\n```"
     )
     human_msg = HumanMessage(content=prompt)
 
+    # Bind JSON mode
+    llm = _make_llm().bind(response_format={"type": "json_object"})
     response = await llm.ainvoke([human_msg])
     data = parse_json_robust(response.content)
     plan = RemediationPlan.model_validate(data)
+
+    # ------------------------------------------------------------------
+    # Faithfulness cross-validation
+    # ------------------------------------------------------------------
+    faithfulness_score: float | None = None
+
+    if kb_result and kb_result.entry and not read_only_mode:
+        faithfulness_score = _cross_validate_plan(plan, kb_result.entry)
+        logger.info("[plan_node] Faithfulness score: %.3f", faithfulness_score)
+
+        if faithfulness_score < _FAITHFULNESS_WARN_THRESHOLD:
+            logger.warning(
+                "[plan_node] LOW-FAITHFULNESS hallucination flag "
+                "(score=%.3f < threshold=%.2f) — "
+                "clearing rollback_command to force HITL review via reject_node",
+                faithfulness_score,
+                _FAITHFULNESS_WARN_THRESHOLD,
+            )
+            plan = RemediationPlan(
+                root_cause=plan.root_cause,
+                steps=plan.steps,
+                rollback_command="",  # Clears is_high_risk → True → reject_node
+                estimated_mttr_minutes=plan.estimated_mttr_minutes,
+                postmortem_summary=(
+                    f"[FAITHFULNESS WARNING: score={faithfulness_score:.2f}] "
+                    + plan.postmortem_summary
+                ),
+            )
 
     # Zero-trust guardrail evaluation
     if plan.is_high_risk:
@@ -650,16 +939,103 @@ async def plan_node(state: dict) -> dict:
             plan.rollback_command[:60],
         )
 
-    # Serialise to markdown for the Rich CLI renderer and approval node
     plan_md = _render_plan_markdown(plan, service, severity)
-
     ai_msg = AIMessage(content=f"Remediation plan drafted.\n\n{plan_md}")
 
     return {
         "plan": plan_md,
         "remediation_plan": plan,
+        "faithfulness_score": faithfulness_score,
         "messages": [human_msg, ai_msg],
     }
+
+
+# ---------------------------------------------------------------------------
+# Private: KB faithfulness cross-validation
+# ---------------------------------------------------------------------------
+
+
+def _cross_validate_plan(plan: RemediationPlan, kb_entry) -> float:
+    """
+    Compute a faithfulness score (0.0–1.0) measuring how closely the LLM-
+    generated plan adheres to the retrieved KB entry.
+
+    Two equal-weight components:
+
+    Command fidelity (50%):
+        What fraction of the plan's generated commands appear in the KB's
+        remediation steps (substring or reverse-substring match after
+        normalisation to remove volatile tokens like pod names / IPs)?
+        A plan that invents new kubectl verbs not in the KB scores 0.0 here.
+
+    Root cause alignment (50%):
+        Jaccard overlap of key terms (length >= 5) between the KB root
+        cause narrative and the LLM's root_cause string.  A plan whose
+        root_cause explanation shares less than 20% vocabulary with the
+        KB entry's narrative is likely hallucinated.
+
+    Args:
+        plan:     The RemediationPlan generated by the LLM.
+        kb_entry: The KBEntry retrieved from the KB store (type: KBEntry).
+
+    Returns:
+        Float in [0.0, 1.0].  Values < 0.50 trigger the hallucination flag.
+    """
+    # --- Command fidelity ---
+    kb_commands = [s.command for s in kb_entry.remediation_steps if s.command]
+    gen_commands = [s.command for s in plan.steps if s.command]
+
+    if not kb_commands:
+        command_fidelity = 1.0  # No KB commands to compare against; not a signal of drift
+    elif not gen_commands:
+        command_fidelity = 0.0  # LLM generated no commands despite KB providing them
+    else:
+        grounded_count = sum(
+            1
+            for gc in gen_commands
+            if any(
+                _normalise_cmd(kc) in _normalise_cmd(gc)
+                or _normalise_cmd(gc) in _normalise_cmd(kc)
+                for kc in kb_commands
+            )
+        )
+        command_fidelity = grounded_count / len(gen_commands)
+
+    # --- Root cause alignment ---
+    kb_terms = set(re.findall(r"\b[a-z]{5,}\b", kb_entry.root_cause_narrative.lower()))
+    gen_terms = set(re.findall(r"\b[a-z]{5,}\b", plan.root_cause.lower()))
+
+    if not kb_terms:
+        root_alignment = 1.0
+    else:
+        overlap = len(kb_terms & gen_terms) / len(kb_terms | gen_terms)
+        # Scale: Jaccard of 0.15+ on domain-specific SRE vocabulary is strong
+        root_alignment = min(1.0, overlap * 2.0)
+
+    score = 0.5 * command_fidelity + 0.5 * root_alignment
+    logger.debug(
+        "[_cross_validate_plan] cmd_fidelity=%.3f root_alignment=%.3f final=%.3f",
+        command_fidelity, root_alignment, score,
+    )
+    return round(score, 4)
+
+
+def _normalise_cmd(cmd: str) -> str:
+    """
+    Normalise a shell / kubectl command for similarity comparison by stripping
+    volatile runtime tokens: pod name suffixes, IP addresses, hex values,
+    and Kubernetes-style random suffixes.
+    """
+    # Remove Kubernetes pod name suffixes: -7d9f8b-xkzp2
+    normalised = re.sub(r"-[a-z0-9]{5,10}-[a-z0-9]{5}\b", "", cmd)
+    # Remove IP addresses
+    normalised = re.sub(r"\d{1,3}(?:\.\d{1,3}){3}(?::\d+)?", "<ip>", normalised)
+    # Remove hex values
+    normalised = re.sub(r"0x[0-9a-fA-F]+", "<hex>", normalised)
+    # Remove standalone integers (ports, counts, memory sizes)
+    normalised = re.sub(r"\b\d{3,}\b", "<n>", normalised)
+    # Collapse whitespace and lowercase
+    return re.sub(r"\s+", " ", normalised).strip().lower()
 
 
 # ---------------------------------------------------------------------------
