@@ -381,4 +381,5 @@ def make_initial_state(raw_alert: dict) -> dict:
         "remediation_plan": None,
         "is_approved": False,
         "postmortem": "",
+        "_live_tool_sequence": [],  # Accumulates LLM tool calls for cache write-back
     }

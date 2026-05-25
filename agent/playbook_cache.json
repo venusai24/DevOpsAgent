@@ -1,0 +1,204 @@
+{
+  "connection_pool": {
+    "keywords": [
+      "connection pool",
+      "db connections",
+      "database connection",
+      "pool exhausted",
+      "postgresql",
+      "queuepool"
+    ],
+    "tool_sequence": [
+      {
+        "tool": "get_metrics",
+        "args": {
+          "query": "db_connections",
+          "time_range": "last_15m"
+        }
+      },
+      {
+        "tool": "get_metrics",
+        "args": {
+          "query": "error_rate",
+          "time_range": "last_15m"
+        }
+      },
+      {
+        "tool": "get_logs",
+        "args": {
+          "service": "{service}",
+          "time_range": "last_15m"
+        }
+      }
+    ],
+    "hit_count": 0
+  },
+  "oom": {
+    "keywords": [
+      "evicted",
+      "exit code 137",
+      "java heap",
+      "memory limit",
+      "oom",
+      "oomkilled",
+      "out of memory",
+      "outofmemoryerror"
+    ],
+    "tool_sequence": [
+      {
+        "tool": "get_metrics",
+        "args": {
+          "query": "memory_utilization",
+          "time_range": "last_15m"
+        }
+      },
+      {
+        "tool": "get_logs",
+        "args": {
+          "service": "{service}",
+          "time_range": "last_15m"
+        }
+      }
+    ],
+    "hit_count": 0
+  },
+  "dns": {
+    "keywords": [
+      "coredns",
+      "dns",
+      "dns rate limit",
+      "dns throttling",
+      "dns timeout",
+      "gaierror",
+      "name resolution",
+      "nxdomain"
+    ],
+    "tool_sequence": [
+      {
+        "tool": "get_metrics",
+        "args": {
+          "query": "error_rate",
+          "time_range": "last_15m"
+        }
+      },
+      {
+        "tool": "get_logs",
+        "args": {
+          "service": "{service}",
+          "time_range": "last_15m"
+        }
+      }
+    ],
+    "hit_count": 0
+  },
+  "disk_full": {
+    "keywords": [
+      "disk",
+      "disk exhaustion",
+      "filesystem",
+      "inode",
+      "no space left",
+      "storage full",
+      "write failure"
+    ],
+    "tool_sequence": [
+      {
+        "tool": "get_metrics",
+        "args": {
+          "query": "disk_utilization",
+          "time_range": "last_15m"
+        }
+      },
+      {
+        "tool": "get_logs",
+        "args": {
+          "service": "{service}",
+          "time_range": "last_15m"
+        }
+      }
+    ],
+    "hit_count": 0
+  },
+  "redis_oom": {
+    "keywords": [
+      "cache oom",
+      "eviction",
+      "maxmemory",
+      "redis",
+      "redisexception",
+      "volatile-lru"
+    ],
+    "tool_sequence": [
+      {
+        "tool": "get_metrics",
+        "args": {
+          "query": "redis_memory",
+          "time_range": "last_15m"
+        }
+      },
+      {
+        "tool": "get_logs",
+        "args": {
+          "service": "{service}",
+          "time_range": "last_15m"
+        }
+      }
+    ],
+    "hit_count": 0
+  },
+  "tls_cert": {
+    "keywords": [
+      "cert expir",
+      "certificate",
+      "handshake failure",
+      "pkix",
+      "ssl",
+      "tls",
+      "x509"
+    ],
+    "tool_sequence": [
+      {
+        "tool": "get_metrics",
+        "args": {
+          "query": "ssl_handshake_errors",
+          "time_range": "last_15m"
+        }
+      },
+      {
+        "tool": "get_logs",
+        "args": {
+          "service": "{service}",
+          "time_range": "last_15m"
+        }
+      }
+    ],
+    "hit_count": 0
+  },
+  "rate_limited": {
+    "keywords": [
+      "429",
+      "circuit breaker",
+      "rate limit",
+      "throttl",
+      "too many requests",
+      "upstream rejection"
+    ],
+    "tool_sequence": [
+      {
+        "tool": "get_metrics",
+        "args": {
+          "query": "upstream_429s",
+          "time_range": "last_15m"
+        }
+      },
+      {
+        "tool": "get_logs",
+        "args": {
+          "service": "{service}",
+          "time_range": "last_15m"
+        }
+      }
+    ],
+    "hit_count": 0
+  }
+}

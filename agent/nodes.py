@@ -30,6 +30,11 @@ from langchain_groq import ChatGroq
 from agent.state import GraphState, RemediationPlan, RemediationStep, TriageResult
 from agent.tools import ALL_TOOLS, get_logs, get_metrics
 from agent.json_parser import parse_json_robust
+from agent.playbook_cache import (
+    lookup_playbook,
+    record_successful_playbook,
+    substitute_service,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -215,6 +220,18 @@ async def investigate_node(state: dict) -> dict:
     router, not the node, controls looping. It also means every tool-call
     round is checkpointed individually, enabling crash-safe resumption.
 
+    Playbook Cache:
+        On the FIRST invocation of each graph run (retry_count == 0), the node
+        checks the playbook cache for a pre-validated tool sequence matching
+        the alert's symptom fingerprint. On a HIT:
+          - All tool calls are replayed deterministically in a single pass.
+          - The LLM is NOT invoked, eliminating hallucination risk and latency.
+          - state["retry_count"] is set to MAX_RETRIES to signal the router
+            that investigation is complete and transition to plan_node.
+        On a MISS, the LLM runs normally. If the investigation reaches
+        INVESTIGATION_COMPLETE, the successful tool sequence is written back
+        to the cache for future use.
+
     Reads:
         state["triage_result"] — For service name.
         state["raw_alert"]     — For alert title.
@@ -225,14 +242,16 @@ async def investigate_node(state: dict) -> dict:
 
     Writes:
         state["telemetry"]   — Appended with new tool output (if a tool ran).
-        state["retry_count"] — Incremented by 1.
+        state["retry_count"] — Incremented by 1 (or set to MAX_RETRIES on cache hit).
         state["messages"]    — Appended with AI + ToolMessage (if tool ran),
                                or the INVESTIGATION_COMPLETE AIMessage.
     """
     triage: TriageResult | None = state.get("triage_result")
     service: str = triage.service if triage else state.get("raw_alert", {}).get("service", "unknown")
     severity: str = state.get("severity", "P1")
-    alert_title: str = state.get("raw_alert", {}).get("title", "Unknown incident")
+    raw_alert: dict = state.get("raw_alert", {})
+    alert_title: str = raw_alert.get("title", "Unknown incident")
+    alert_description: str = raw_alert.get("description", "")
     telemetry_so_far: str = state.get("telemetry", "")
     retry_count: int = state.get("retry_count", 0)
     remaining = MAX_RETRIES - retry_count
@@ -243,8 +262,86 @@ async def investigate_node(state: dict) -> dict:
     )
 
     # ---------------------------------------------------------------
-    # Build the prompt for this investigation round
+    # Playbook Cache Lookup (only on the FIRST iteration of a run)
     # ---------------------------------------------------------------
+    if retry_count == 0:
+        cache_result = lookup_playbook(alert_title, alert_description)
+        if cache_result is not None:
+            fingerprint, raw_sequence = cache_result
+            # Substitute the runtime service name into any "{service}" placeholders
+            tool_sequence = substitute_service(raw_sequence, service)
+
+            logger.info(
+                "[investigate_node] CACHE HIT fingerprint=%r — replaying %d tool calls, skipping LLM",
+                fingerprint, len(tool_sequence),
+            )
+
+            new_telemetry = telemetry_so_far
+            new_messages: list = []
+            step_index = 0
+
+            for step in tool_sequence:
+                step_index += 1
+                tool_name: str = step["tool"]
+                tool_args: dict = step["args"]
+                # Generate a synthetic tool_call_id so ToolMessage format is valid
+                tool_call_id = f"cache_{fingerprint}_{step_index}"
+
+                logger.info(
+                    "[investigate_node] Replaying cached step %d: %s(%s)",
+                    step_index, tool_name, tool_args,
+                )
+
+                try:
+                    if tool_name == "get_metrics":
+                        tool_result: str = await get_metrics.ainvoke(tool_args)
+                    elif tool_name == "get_logs":
+                        tool_result = await get_logs.ainvoke(tool_args)
+                    else:
+                        tool_result = f"[CACHE] Unknown tool in playbook: {tool_name}"
+                except Exception as exc:
+                    tool_result = f"[CACHE TOOL ERROR] {tool_name}: {exc}"
+                    logger.warning(
+                        "[investigate_node] Cached tool %s failed: %s — proceeding with partial telemetry",
+                        tool_name, exc,
+                    )
+
+                # Append as a ToolMessage with a synthetic AI tool-call wrapper
+                tool_msg = ToolMessage(
+                    content=tool_result,
+                    tool_call_id=tool_call_id,
+                    name=tool_name,
+                )
+                new_messages.append(tool_msg)
+
+                section_header = (
+                    f"\n\n---\n### [CACHED] Step {step_index} — `{tool_name}`"
+                    f"({', '.join(f'{k}={v!r}' for k, v in tool_args.items())})\n"
+                )
+                new_telemetry = new_telemetry + section_header + tool_result
+
+            # Append a synthetic INVESTIGATION_COMPLETE message so the router
+            # correctly transitions to extract_node → plan_node.
+            complete_msg = AIMessage(
+                content="INVESTIGATION_COMPLETE (served from playbook cache)"
+            )
+            new_messages.append(complete_msg)
+
+            return {
+                "telemetry": new_telemetry,
+                # Set retry_count to MAX_RETRIES so the router exits the loop
+                "retry_count": MAX_RETRIES,
+                "messages": new_messages,
+            }
+
+    # ---------------------------------------------------------------
+    # Cache MISS — run the LLM normally
+    # ---------------------------------------------------------------
+
+    # Accumulate the tool calls made during this live run so they can be
+    # written back to the cache if the investigation completes successfully.
+    live_tool_sequence: list[dict[str, Any]] = state.get("_live_tool_sequence", [])
+
     prompt = _INVESTIGATE_PROMPT_TEMPLATE.format(
         service=service,
         severity=severity,
@@ -253,21 +350,16 @@ async def investigate_node(state: dict) -> dict:
         remaining_retries=remaining,
     )
 
-    # Prepend the structured prompt as the first human message for this round.
-    # We pass the full message history so the LLM sees all previous tool calls.
     prior_messages = state.get("messages", [])
     round_messages = [HumanMessage(content=prompt)] + prior_messages
 
-    # ---------------------------------------------------------------
-    # Invoke LLM with tools bound
-    # ---------------------------------------------------------------
     llm = _make_llm()
     llm_with_tools = llm.bind_tools(ALL_TOOLS)
 
     ai_response: AIMessage = await llm_with_tools.ainvoke(round_messages)
 
-    new_messages: list = [ai_response]
-    new_telemetry: str = telemetry_so_far
+    new_messages = [ai_response]
+    new_telemetry = telemetry_so_far
     new_retry_count: int = retry_count + 1
 
     # ---------------------------------------------------------------
@@ -275,27 +367,25 @@ async def investigate_node(state: dict) -> dict:
     # ---------------------------------------------------------------
     if ai_response.tool_calls:
         tool_call = ai_response.tool_calls[0]  # Process one call per round
-        tool_name: str = tool_call["name"]
-        tool_args: dict = tool_call["args"]
-        tool_call_id: str = tool_call["id"]
+        tool_name = tool_call["name"]
+        tool_args = tool_call["args"]
+        tool_call_id = tool_call["id"]
 
         logger.info(
             "[investigate_node] tool_call name=%s args=%s", tool_name, tool_args
         )
 
-        # Dispatch the tool call
         try:
             if tool_name == "get_metrics":
-                tool_result: str = await get_metrics.ainvoke(tool_args)
+                tool_result = await get_metrics.ainvoke(tool_args)
             elif tool_name == "get_logs":
                 tool_result = await get_logs.ainvoke(tool_args)
             else:
                 tool_result = f"Unknown tool: {tool_name}"
-        except Exception as exc:  # ToolException or unexpected errors
+        except Exception as exc:
             tool_result = f"[TOOL ERROR] {tool_name}: {exc}"
             logger.warning("[investigate_node] Tool error: %s", exc)
 
-        # Append the tool result as a ToolMessage so the LLM can read it
         tool_msg = ToolMessage(
             content=tool_result,
             tool_call_id=tool_call_id,
@@ -303,7 +393,6 @@ async def investigate_node(state: dict) -> dict:
         )
         new_messages.append(tool_msg)
 
-        # Accumulate telemetry: each round appends its section header + result
         section_header = (
             f"\n\n---\n### Round {new_retry_count} — `{tool_name}`"
             f"({', '.join(f'{k}={v!r}' for k, v in tool_args.items())})\n"
@@ -314,6 +403,9 @@ async def investigate_node(state: dict) -> dict:
             "[investigate_node] telemetry length=%d chars", len(new_telemetry)
         )
 
+        # Record this tool call for potential cache write-back later
+        live_tool_sequence = live_tool_sequence + [{"tool": tool_name, "args": tool_args}]
+
     # ---------------------------------------------------------------
     # Case B: LLM signals investigation is complete (no tool call)
     # ---------------------------------------------------------------
@@ -321,9 +413,14 @@ async def investigate_node(state: dict) -> dict:
         response_text: str = ai_response.content or ""
         if "INVESTIGATION_COMPLETE" in response_text:
             logger.info("[investigate_node] LLM signalled INVESTIGATION_COMPLETE")
+            # Write the validated tool sequence back to the cache for future use
+            if live_tool_sequence:
+                record_successful_playbook(
+                    alert_title=alert_title,
+                    alert_description=alert_description,
+                    tool_sequence=live_tool_sequence,
+                )
         else:
-            # LLM gave a free-form response without a tool call — treat it as
-            # an implicit completion (the router will check retry_count).
             logger.warning(
                 "[investigate_node] No tool call and no INVESTIGATION_COMPLETE. "
                 "Response: %s",
@@ -334,6 +431,7 @@ async def investigate_node(state: dict) -> dict:
         "telemetry": new_telemetry,
         "retry_count": new_retry_count,
         "messages": new_messages,
+        "_live_tool_sequence": live_tool_sequence,
     }
 
 
