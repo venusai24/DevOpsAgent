@@ -80,6 +80,8 @@ from langgraph.types import Command, interrupt
 from config import settings
 from agent.integrations.slack import send_slack_approval_request
 from agent.integrations.k8s import apply_kubectl_command
+from agent.integrations.shell import execute_shell_command
+from agent.integrations.psql import execute_psql_command
 from agent.security.guardrails import is_safe_command
 
 from agent.nodes import (
@@ -254,23 +256,38 @@ async def execute_node(state: dict) -> dict:
 
     logger.info("[execute_node] Generating postmortem for service=%s", service)
 
-    # --- Simulate execution of each kubectl / shell step ---
+    # --- Execute each remediation step, routing by environment ---
     executed_steps: list[str] = []
     execution_succeeded = True
     if plan:
         for step in sorted(plan.steps, key=lambda s: s.order):
             log_line = f"✅ Step {step.order}: {step.action}"
-            
+
             if step.command:
-                # Apply Guardrails
-                if not is_safe_command(step.command):
-                    log_line += f"\n   `[BLOCKED BY GUARDRAIL] {step.command}`"
+                environment: str = step.environment if hasattr(step, "environment") else "kubectl"
+
+                # Apply guardrails (environment-aware: routes L1+L2+L3 for kubectl,
+                # L1+L5 for shell, L1+L6 for psql)
+                if not is_safe_command(step.command, environment=environment):
+                    log_line += f"\n   `[BLOCKED BY GUARDRAIL ({environment})] {step.command}`"
                     execution_succeeded = False
+
                 else:
-                    # Apply Kubernetes SDK
-                    k8s_result = apply_kubectl_command(step.command)
-                    log_line += f"\n   `{step.command}`\n   Output: {k8s_result}"
-                    
+                    # Dispatch to the correct executor based on the step's environment
+                    if environment == "shell":
+                        result = execute_shell_command(step.command)
+                    elif environment == "psql":
+                        result = execute_psql_command(step.command)
+                    else:
+                        # Default: kubectl (covers both 'kubectl' literal and unset)
+                        result = apply_kubectl_command(step.command)
+
+                    log_line += f"\n   `{step.command}`\n   Output: {result}"
+
+                    # Mark execution as failed if executor returned an error tag
+                    if "[Error" in result or "[BLOCKED" in result:
+                        execution_succeeded = False
+
             executed_steps.append(log_line)
             logger.info("[execute_node] %s", log_line)
 

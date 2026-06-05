@@ -28,11 +28,35 @@ Defense-in-depth strategy (layered, applied in order):
     that deviate from the KB ground truth are flagged.  Callers in execute_node
     may choose to block or escalate based on this result.
 
-Usage:
-    from agent.security.guardrails import is_safe_command, is_command_grounded
+  Layer 5 — Shell binary allowlist (shell environment only):
+    For steps whose environment is 'shell', the first token (binary name) is
+    checked against a curated allowlist of safe SRE utilities.  Binaries not
+    in the list are blocked before any subprocess is spawned.
+    Delegated to: is_safe_shell_command()
 
-    if not is_safe_command(command):
+  Layer 6 — psql DDL/DCL blocklist (psql environment only):
+    For steps whose environment is 'psql', the SQL statement type is validated
+    against an allowlist of operational DML keywords.  DDL (DROP, CREATE,
+    ALTER TABLE) and DCL (GRANT, REVOKE) are always blocked.
+    Delegated to: is_safe_psql_command()
+
+Usage:
+    from agent.security.guardrails import (
+        is_safe_command,
+        is_safe_shell_command,
+        is_safe_psql_command,
+        is_command_grounded,
+    )
+
+    # Generic entry point (routes by environment):
+    if not is_safe_command(command, environment=step.environment):
         # block
+
+    # Or call environment-specific helpers directly:
+    if not is_safe_shell_command(command):
+        # block shell
+    if not is_safe_psql_command(command):
+        # block psql
     if not is_command_grounded(command, kb_entry):
         # flag / escalate
 """
@@ -138,19 +162,25 @@ _NAMESPACE_SAFE_VERBS: frozenset[str] = frozenset(
 # ---------------------------------------------------------------------------
 
 
-def is_safe_command(command: str, kb_entry=None) -> bool:
+def is_safe_command(command: str, environment: str = "kubectl", kb_entry=None) -> bool:
     """
     Evaluate whether *command* passes all guardrail layers.
 
-    Layers applied in order:
-      1. Destructive blocklist
-      2. kubectl RBAC verb allowlist (only for kubectl commands)
-      3. Protected namespace check (only for kubectl commands)
-      (Layer 4 — KB grounding — is a separate function: ``is_command_grounded``.)
+    Routes to the environment-specific guardrail after the universal Layer 1
+    destructive blocklist is applied:
+
+      environment='kubectl' → Layers 1, 2, 3 (kubectl RBAC + namespace)
+      environment='shell'   → Layers 1, 5 (binary allowlist)
+      environment='psql'    → Layers 1, 6 (SQL statement type allowlist)
+
+    Layer 4 (KB grounding) is a separate function: ``is_command_grounded``.
 
     Args:
-        command:   The raw shell / kubectl / psql command string.
-        kb_entry:  Optional KBEntry; reserved for future Layer 4 inline check.
+        command:     The raw shell / kubectl / psql command string.
+        environment: The execution target from ``RemediationStep.environment``.
+                     One of 'kubectl', 'shell', 'psql'. Defaults to 'kubectl'
+                     for backwards compatibility.
+        kb_entry:    Optional KBEntry; reserved for future Layer 4 inline check.
 
     Returns:
         True if the command passes all layers, False if any layer blocks it.
@@ -158,7 +188,7 @@ def is_safe_command(command: str, kb_entry=None) -> bool:
     if not command or not command.strip():
         return True  # Empty command is trivially safe
 
-    # Layer 1: Destructive pattern blocklist
+    # Layer 1: Destructive pattern blocklist — applies to ALL environments
     for pattern in _DESTRUCTIVE_PATTERNS:
         if pattern.search(command):
             logger.warning(
@@ -168,7 +198,14 @@ def is_safe_command(command: str, kb_entry=None) -> bool:
             )
             return False
 
-    # Layers 2–3 apply only to kubectl commands
+    # Route to environment-specific layers
+    if environment == "shell":
+        return is_safe_shell_command(command)
+
+    if environment == "psql":
+        return is_safe_psql_command(command)
+
+    # Default: kubectl layers 2–3
     if "kubectl" in command:
         verb = _extract_kubectl_verb(command)
 
@@ -202,6 +239,87 @@ def is_safe_command(command: str, kb_entry=None) -> bool:
                     command[:120],
                 )
                 return False
+
+    return True
+
+
+def is_safe_shell_command(command: str) -> bool:
+    """
+    Layer 5 — Shell binary allowlist.
+
+    Validates that the first token of *command* (the binary name) is in the
+    curated allowlist defined in ``agent/integrations/shell.py``.  This check
+    is performed here so that guardrail decisions are centralised and testable
+    without importing the subprocess-executing integration module.
+
+    Args:
+        command: Raw shell command string.
+
+    Returns:
+        True if the binary is in the allowlist, False otherwise.
+    """
+    import shlex
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        logger.warning("[guardrail:L5] Failed to tokenise shell command: %r", command[:120])
+        return False
+
+    if not tokens:
+        return True
+
+    binary = tokens[0].split("/")[-1]  # strip absolute path prefix
+
+    # Import allowlist from the integration module to keep it DRY
+    from agent.integrations.shell import _SHELL_ALLOWED_BINARIES
+    if binary not in _SHELL_ALLOWED_BINARIES:
+        logger.warning(
+            "[guardrail:L5] BLOCKED shell binary not in allowlist: %r | cmd=%r",
+            binary,
+            command[:120],
+        )
+        return False
+
+    return True
+
+
+def is_safe_psql_command(command: str) -> bool:
+    """
+    Layer 6 — psql SQL statement type allowlist.
+
+    Extracts the SQL from a raw psql command string (stripping any
+    ``kubectl exec ... psql -c`` wrapper) and verifies that the leading
+    SQL keyword is in the operational DML allowlist.  DDL and DCL keywords
+    are always blocked.
+
+    Args:
+        command: Raw psql or ``psql -c '...'`` command string.
+
+    Returns:
+        True if the statement type is permitted, False otherwise.
+    """
+    # Import helpers from the integration module to keep SQL parsing DRY
+    from agent.integrations.psql import _extract_sql, _PSQL_ALLOWED_STATEMENT_TYPES, _PSQL_BLOCKED_KEYWORDS
+
+    sql = _extract_sql(command)
+
+    for pattern in _PSQL_BLOCKED_KEYWORDS:
+        if pattern.search(sql):
+            logger.warning(
+                "[guardrail:L6] BLOCKED psql DDL/DCL keyword %r | sql=%r",
+                pattern.pattern,
+                sql[:120],
+            )
+            return False
+
+    first_keyword = sql.strip().split()[0].lower() if sql.strip() else ""
+    if first_keyword not in _PSQL_ALLOWED_STATEMENT_TYPES:
+        logger.warning(
+            "[guardrail:L6] BLOCKED disallowed psql statement type %r | sql=%r",
+            first_keyword,
+            sql[:120],
+        )
+        return False
 
     return True
 
