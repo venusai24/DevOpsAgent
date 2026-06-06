@@ -1,0 +1,17 @@
+.env
+plsn.txt
+checkpoints.sqlite
+__pycache__/
+*.pyc
+
+# Deprecated / Old Codebase
+*.md
+agent/
+api/
+cli/
+worker/
+tests/test_cbr_engine.py
+tests/test_evals.py
+tests/test_knowledge_graph.py
+tests/test_perception.py
+tests/test_safety.py
