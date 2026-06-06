@@ -1,0 +1,270 @@
+[
+    {
+        "fault_id": "FLT-001",
+        "category": "Resource Exhaustion",
+        "description": "A memory leak in the JVM heap of the order-processing service causes progressive memory growth, eventually triggering OOM killer and cascading pod restarts across the cluster.",
+        "sregym_command": "prek inject --type memory-leak --target svc/order-processor --rate 50MB/min --duration 300s --namespace production",
+        "expected_root_cause": "Unbounded in-memory session cache in order-processor-v2.3.1 accumulates stale entries due to missing TTL eviction policy, exhausting JVM heap (-Xmx2g limit reached within ~5 minutes under normal load).",
+        "expected_mitigation": "Trigger rolling restart of order-processor pods via kubectl rollout restart deployment/order-processor; patch ConfigMap to set SESSION_CACHE_TTL=300 and SESSION_CACHE_MAX_SIZE=10000; alert #platform-oncall to schedule hotfix deployment for cache eviction logic."
+    },
+    {
+        "fault_id": "FLT-002",
+        "category": "Network Degradation",
+        "description": "Artificial 300ms p99 latency and 5% packet loss injected on egress traffic between the API gateway and downstream microservices, simulating degraded cross-AZ network fabric.",
+        "sregym_command": "prek inject --type network-latency --target deployment/api-gateway --egress --latency 300ms --jitter 80ms --loss 5% --duration 600s --namespace production",
+        "expected_root_cause": "Network policy misconfiguration after infra upgrade routed inter-AZ pod traffic through a congested NAT gateway instance (nat-0a3f91bc) instead of direct VPC routing, introducing 280-350ms RTT and sporadic packet drops on the 10.0.2.0/24 subnet.",
+        "expected_mitigation": "Apply corrected VPC route table entry via aws ec2 replace-route to restore direct AZ routing; temporarily increase API gateway timeout thresholds from 500ms to 1000ms; enable circuit breaker on downstream service calls with 600ms threshold to shed load while fix propagates."
+    },
+    {
+        "fault_id": "FLT-003",
+        "category": "Dependency Failure",
+        "description": "Primary PostgreSQL database connection pool exhaustion simulated by holding open idle connections and injecting 10-second query timeouts on the payments service, producing cascading 503s.",
+        "sregym_command": "prek inject --type db-timeout --target svc/payments-db --query-timeout 10000ms --connection-hold 90 --pool-exhaust --duration 480s --namespace production",
+        "expected_root_cause": "PgBouncer connection pool misconfigured with pool_size=20 against a payments service that spawns up to 80 concurrent threads under peak load; long-running OLAP queries from the analytics replica bleeding into the OLTP pool via incorrect pgbouncer.ini routing rules exhausted all available slots.",
+        "expected_mitigation": "Restart PgBouncer with corrected pgbouncer.ini (pool_size=100, max_client_conn=500, server_idle_timeout=60); kill long-running queries via SELECT pg_terminate_backend(pid) WHERE query_duration > interval '5 seconds'; redirect analytics queries to read replica using payments-db-replica DNS alias."
+    },
+    {
+        "fault_id": "FLT-004",
+        "category": "Configuration Error",
+        "description": "A bad Envoy routing rule deployed via GitOps sends 100% of /api/v2/checkout traffic to a canary pod running an incompatible schema version, causing universal 422 Unprocessable Entity errors.",
+        "sregym_command": "prek inject --type config-error --target virtualservice/checkout-vs --patch '{\"spec\":{\"http\":[{\"route\":[{\"destination\":{\"host\":\"checkout-svc\",\"subset\":\"canary\"},\"weight\":100}]}]}}' --namespace production",
+        "expected_root_cause": "VirtualService checkout-vs was patched by an automated canary promotion pipeline (Argo Rollouts v1.6.2) that incorrectly evaluated a passing smoke test against the staging cluster as production readiness; canary subset runs checkout-svc:v4.1.0-rc2 which expects request body field 'payment_method_token' renamed from 'token' — breaking all stable clients.",
+        "expected_mitigation": "Immediately revert VirtualService weight to 100% stable via kubectl patch virtualservice checkout-vs --patch to restore traffic; halt Argo Rollouts promotion pipeline; roll back canary deployment to checkout-svc:v4.0.3; add contract testing gate to Argo Rollouts analysis template to validate field-level API compatibility before promotion."
+    },
+    {
+        "fault_id": "FLT-005",
+        "category": "Application Logic",
+        "description": "HTTP 500 errors injected on POST /api/v1/inventory/update for payloads where quantity_delta exceeds 1000, simulating a silent integer overflow bug in the inventory management service triggered by bulk import jobs.",
+        "sregym_command": "prek inject --type http-error --target svc/inventory-svc --endpoint 'POST /api/v1/inventory/update' --condition 'body.quantity_delta > 1000' --status 500 --error-body '{\"error\":\"internal_server_error\",\"code\":\"INV_OVERFLOW\"}' --duration 900s --namespace production",
+        "expected_root_cause": "Integer overflow in InventoryService.applyDelta() method: quantity_delta stored as int16 (max 32767) but bulk CSV import sends values up to 999999; arithmetic overflow wraps to negative, triggering a stock-level constraint violation (CHECK quantity >= 0) in the database which propagates as an unhandled 500 to callers.",
+        "expected_mitigation": "Deploy hotfix to change quantity_delta field type from int16 to int64 in inventory-svc; add input validation middleware to reject quantity_delta > 500000 with 400 Bad Request; temporarily pause bulk import job (kubectl suspend cronjob/inventory-bulk-import) until hotfix is deployed; backfill any corrupted inventory rows from last known-good snapshot."
+    },
+    {
+        "fault_id": "FLT-ADV-001",
+        "category": "Cascading Failure",
+        "difficulty": "extreme",
+        "description": "NTP daemon killed on 3 of 12 Kafka broker nodes causes their system clocks to drift +4.3 seconds over 20 minutes. Kafka leader election uses monotonic timestamps; drifted brokers win spurious elections, causing consumer group rebalances every 90 seconds, which in turn saturates ZooKeeper with ephemeral node churn and locks out the schema registry — producing a 3-layer cascade that looks like a ZooKeeper instability incident.",
+        "sregym_command": "prek inject --type process-kill --target daemonset/ntp-sync --node-selector 'rack=us-east-1b' --count 3 --no-restart --duration 1800s --namespace kube-system && prek watch --metric system.clock.drift --alert-threshold 2000ms",
+        "expected_root_cause": "NTP daemon absence on broker nodes rack-us-east-1b-{04,07,11} allowed wall-clock drift exceeding Kafka's internal.leader.rebalance.max.ms threshold (default 300ms), triggering continuous ISR shrink/expand cycles; ZooKeeper session timeouts cascaded as brokers flooded it with 800+ reconnect attempts/sec, starving the schema registry of its ZooKeeper lease renewal within 12 minutes of fault injection.",
+        "expected_mitigation": "Restore NTP sync via chronyc makestep on affected nodes to force immediate clock correction; issue kafka-leader-election --all-partitions to rebalance leadership after clock convergence; increase zookeeper.session.timeout.ms to 30000ms temporarily; restart schema registry pods post-ZooKeeper stabilization; add clock drift alert (>500ms) to broker node DaemonSet health checks.",
+        "deceptive_signals": [
+            "ZooKeeper logs show session timeout errors — AIRS may misattribute to ZooKeeper overload",
+            "Schema registry 503s look like a dependency failure",
+            "Kafka consumer lag spike resembles a traffic surge",
+            "No obvious error in Kafka broker logs for first 8 minutes"
+        ],
+        "airs_evaluation": {
+            "ttd_target_seconds": 300,
+            "correct_layer_attribution": true,
+            "requires_cross_service_correlation": true,
+            "difficulty_score": 9,
+            "trap_count": 4
+        }
+    },
+    {
+        "fault_id": "FLT-ADV-002",
+        "category": "Heisenbugs",
+        "difficulty": "extreme",
+        "description": "Enabling distributed tracing at 100% sample rate on the recommendation engine triggers a Prometheus scrape loop bug — every trace span emits a counter label with a high-cardinality request_id dimension, causing Prometheus TSDB to OOM after ~40 minutes. The system appears healthy until Prometheus dies, at which point all alerting goes dark and AIRS loses its primary signal source. The act of observing the fault destroys the observer.",
+        "sregym_command": "prek inject --type config-patch --target configmap/otel-collector-config --patch '{\"data\":{\"TRACE_SAMPLE_RATE\":\"1.0\",\"SPAN_ATTRIBUTE_REQUEST_ID\":\"true\"}}' --namespace monitoring && prek watch --target pod/prometheus-0 --event OOMKilled",
+        "expected_root_cause": "OTel collector config patch enabled request_id as a span attribute exported to Prometheus via remote_write; Prometheus ingested 14M+ unique time series (request_id cardinality) within 38 minutes, exhausting its 8Gi memory limit and triggering OOMKill; all alert evaluation halted as Prometheus restarted in a crash loop due to corrupt WAL from mid-write OOM.",
+        "expected_mitigation": "Immediately revert otel-collector-config to TRACE_SAMPLE_RATE=0.01 and remove SPAN_ATTRIBUTE_REQUEST_ID; delete corrupted Prometheus WAL (rm -rf /prometheus/wal) and restart pod; add Prometheus cardinality guard via --storage.tsdb.max-block-duration=2h and alerting rule on prometheus_tsdb_head_series > 5000000; implement label allow-listing in remote_write config to block high-cardinality dimensions.",
+        "deceptive_signals": [
+            "System appears completely healthy until minute 38",
+            "All alerts go silent simultaneously — looks like a monitoring outage not a real incident",
+            "Prometheus OOM looks unrelated to the recommendation engine config change",
+            "High-cardinality labels are invisible in standard Grafana dashboards"
+        ],
+        "airs_evaluation": {
+            "ttd_target_seconds": 180,
+            "correct_layer_attribution": true,
+            "requires_cross_service_correlation": true,
+            "difficulty_score": 10,
+            "trap_count": 4
+        }
+    },
+    {
+        "fault_id": "FLT-ADV-003",
+        "category": "Partial Failure",
+        "difficulty": "extreme",
+        "description": "A cert rotation job deploys a new TLS certificate that omits ECDHE cipher suites, breaking mutual TLS only for clients running OpenSSL < 1.1.1 (legacy internal batch jobs). HTTP/2 clients succeed; HTTP/1.1 clients silently fall back to TLS 1.0 and fail certificate validation. Error rate is 3.7% — below most alert thresholds — and only affects batch jobs running between 02:00-04:00 UTC, making it invisible during business hours.",
+        "sregym_command": "prek inject --type cert-rotation --target secret/api-gateway-tls --cipher-exclude ECDHE --validity 90d --namespace production && prek schedule --window '02:00-04:00 UTC' --trigger batch-job-selector 'job-type=reconciliation'",
+        "expected_root_cause": "Automated cert rotation via cert-manager v1.13.2 generated a new RSA-2048 cert with cipher suite restricted to TLS_AES_256_GCM_SHA384 and TLS_CHACHA20_POLY1305_SHA256 only; legacy reconciliation jobs compiled against OpenSSL 1.0.2 cannot negotiate these suites and produce 'no shared cipher' SSL handshake errors; HTTP/2 multiplexing masked the failure in application-level metrics because successful requests dominated the error sample.",
+        "expected_mitigation": "Regenerate certificate via cert-manager with cipher suites including TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384; add TLS negotiation probe to synthetic monitoring targeting legacy User-Agent strings; short-term: annotate cert-manager Certificate resource with allowed-cipher-suites annotation; schedule batch job TLS compatibility matrix test in CI pipeline.",
+        "deceptive_signals": [
+            "3.7% error rate is below PagerDuty threshold (5%)",
+            "Only fails 02:00-04:00 UTC — invisible to daytime on-call",
+            "HTTP/2 success rate masks the failure in aggregate metrics",
+            "TLS handshake errors logged at DEBUG level only in legacy job agents"
+        ],
+        "airs_evaluation": {
+            "ttd_target_seconds": 600,
+            "correct_layer_attribution": true,
+            "requires_cross_service_correlation": false,
+            "difficulty_score": 9,
+            "trap_count": 4
+        }
+    },
+    {
+        "fault_id": "FLT-ADV-004",
+        "category": "Resource Exhaustion",
+        "difficulty": "hard",
+        "description": "A log rotation misconfiguration causes the /var/log partition on all worker nodes to generate millions of zero-byte rotated log files, exhausting inode count while disk usage remains at 12%. Applications start failing with 'No space left on device' despite df -h showing ample space — a classic inode trap that misleads most automated disk-space remediation runbooks.",
+        "sregym_command": "prek inject --type file-flood --target daemonset/log-rotator --patch '{\"LOG_MAX_SIZE\":\"1B\",\"LOG_ROTATE_INTERVAL\":\"1s\",\"LOG_COMPRESS\":\"false\"}' --node-selector 'role=worker' --duration 3600s --namespace kube-system",
+        "expected_root_cause": "logrotate config patched with maxsize 1B and rotate every 1 second on /var/log/containers/*.log produced ~2.3M inode allocations per hour per node; ext4 filesystem on /var/log provisioned with default inode ratio (1 per 16KB) capped total inodes at 1.8M; inode table exhausted after 47 minutes while block usage remained at 12%, causing kernel ENOSPC errors on any new file-create syscall.",
+        "expected_mitigation": "Run find /var/log -name '*.log.*' -size 0 -delete on all affected nodes to recover inodes; patch log-rotator DaemonSet config to restore LOG_MAX_SIZE=100MB and LOG_ROTATE_INTERVAL=24h; add inode utilization metric (node_filesystem_files_free / node_filesystem_files < 0.1) to node alerting rules; consider reformatting /var/log with lower inode ratio (-i 4096) on next node rebuild.",
+        "deceptive_signals": [
+            "df -h shows 12% disk usage — standard disk-full runbook aborts immediately",
+            "ENOSPC errors look identical to genuine disk-full errors in app logs",
+            "Automated disk-cleanup job deletes large files, finds nothing, marks remediation successful",
+            "PVC utilization dashboards show green across all nodes"
+        ],
+        "airs_evaluation": {
+            "ttd_target_seconds": 240,
+            "correct_layer_attribution": true,
+            "requires_cross_service_correlation": false,
+            "difficulty_score": 7,
+            "trap_count": 4
+        }
+    },
+    {
+        "fault_id": "FLT-ADV-005",
+        "category": "Application Logic",
+        "difficulty": "hard",
+        "description": "Two microservices — wallet-svc and ledger-svc — perform a two-phase credit operation without distributed locking. Under >200 concurrent requests, a race window allows double-crediting: balance reads happen before writes commit in the other service. Financial totals drift silently; no 5xx errors are produced. AIRS must detect correctness degradation from business metric anomalies, not error rates.",
+        "sregym_command": "prek inject --type load-spike --target svc/wallet-svc --rps 250 --endpoint 'POST /credit' --concurrent-split svc/ledger-svc --duration 600s --namespace production && prek watch --metric business.wallet.balance_drift --threshold 0.01",
+        "expected_root_cause": "wallet-svc.creditAccount() reads current balance from Redis cache before ledger-svc.recordTransaction() acquires its Postgres row-level lock; under 250 RPS, the 8-12ms Redis read-to-write window is wide enough for concurrent requests to read stale balance and both commit increments — producing double-credits at ~0.4% of transactions; no error is raised as both writes succeed independently.",
+        "expected_mitigation": "Implement distributed pessimistic lock via Redlock (SET wallet:lock:{account_id} NX PX 5000) in wallet-svc before balance read; add idempotency key check in ledger-svc.recordTransaction() using a UUID per credit request stored in a dedup table; run balance reconciliation job (reconcile-balances --since 10m) to identify and reverse double-credited accounts; add business metric alert on wallet.balance_drift > 0.001%.",
+        "deceptive_signals": [
+            "Zero HTTP errors — standard error-rate monitoring is completely blind",
+            "Race window is 8-12ms — not reproducible in low-concurrency staging",
+            "Only 0.4% of transactions affected — statistical noise in most dashboards",
+            "Redis and Postgres both report healthy latency and no errors"
+        ],
+        "airs_evaluation": {
+            "ttd_target_seconds": 900,
+            "correct_layer_attribution": true,
+            "requires_cross_service_correlation": true,
+            "difficulty_score": 8,
+            "trap_count": 4
+        }
+    },
+    {
+        "fault_id": "FLT-ADV-006",
+        "category": "Dependency Failure",
+        "difficulty": "hard",
+        "description": "A rolling deployment of the product catalogue service causes Redis cache keys to expire simultaneously (all TTLs set to exactly 3600s at startup). After deploy, all 48 pods start with empty caches and the first 90 seconds of traffic slams the origin database with full-table scans at 1200 QPS — 40x normal DB load. DB CPU hits 100%, query queue depth spikes to 800, and write transactions time out causing checkout failures.",
+        "sregym_command": "prek inject --type rolling-deploy --target deployment/catalogue-svc --image catalogue-svc:v2.1.4 --cache-flush --ttl-homogenize 3600 --namespace production && prek watch --metric db.query_queue_depth --alert-threshold 100",
+        "expected_root_cause": "catalogue-svc cache warming on startup calls redis.set(key, value, ex=3600) for all 220K product keys using a fixed TTL; rolling deploy of all 48 pods within a 60-second window synchronized cache population times; exactly 3600 seconds later all keys expired in a 2-second window; cache miss rate hit 100% and requests fell through to PostgreSQL catalogue_db, which has no query result cache, executing full sequential scans on a 12M-row products table.",
+        "expected_mitigation": "Immediately enable read replica routing for catalogue queries via CATALOGUE_DB_READ_REPLICA=true env var; apply cache jitter patch (redis.set(key, value, ex=3600 + random(0,600))) and trigger cache warm-up job (warm-cache --service catalogue --async); add circuit breaker to catalogue-svc with fallback to stale cache on DB timeout; scale catalogue_db read replicas from 2 to 4 via RDS console.",
+        "deceptive_signals": [
+            "Symptom appears 60 minutes after deploy — on-call may not connect it to the deploy",
+            "DB spike looks like a traffic surge or DDoS to monitoring tools",
+            "Checkout errors look like a payment service issue",
+            "Cache hit rate metric only updates every 60 seconds — herd is over before the alert fires"
+        ],
+        "airs_evaluation": {
+            "ttd_target_seconds": 180,
+            "correct_layer_attribution": true,
+            "requires_cross_service_correlation": true,
+            "difficulty_score": 7,
+            "trap_count": 4
+        }
+    },
+    {
+        "fault_id": "FLT-ADV-007",
+        "category": "Network Degradation",
+        "difficulty": "extreme",
+        "description": "BGP route advertisement bug causes outbound packets from us-east-1a to us-east-1c to route correctly, but return packets take a misconfigured ECMP path that drops 30% of ACKs. TCP connections appear established; data is sent; but ACK loss triggers exponential backoff and retransmit storms. Throughput collapses to 8% of normal. HTTP health checks (TCP-level) pass. Only application-level throughput metrics reveal the fault.",
+        "sregym_command": "prek inject --type asymmetric-loss --source-az us-east-1a --dest-az us-east-1c --direction return-path --loss-rate 30% --protocol TCP --duration 900s --namespace network",
+        "expected_root_cause": "ECMP weight misconfiguration on core-rtr-east-1c-02 after a maintenance change set link weight to 0 on the return path interface toward us-east-1a, causing 30% of return-path packets to hash onto a null route (black-holed); TCP retransmit rate rose to 28% on cross-AZ connections; application throughput degraded 92% as window scaling was suppressed; TCP keepalives and SYN-ACK exchanges succeeded (masking the issue from L4 health checks).",
+        "expected_mitigation": "Correct ECMP weight on core-rtr-east-1c-02 interface eth0/2 via router CLI (set interface weight 100); verify with traceroute --sport 12345 from us-east-1a to us-east-1c for return-path symmetry; add TCP retransmit rate alert (node_network_transmit_errs_total > 2%) per AZ pair; implement application-level throughput SLO (p95 transfer rate > 50MB/s) as a canary for black-hole detection.",
+        "deceptive_signals": [
+            "TCP health checks pass — load balancer never removes the affected hosts",
+            "Outbound latency is normal — only return-path ACKs are lost",
+            "Error rate is 0% — all requests eventually succeed via retransmit",
+            "Network team sees no errors on interface counters — null-routed packets leave no trace"
+        ],
+        "airs_evaluation": {
+            "ttd_target_seconds": 420,
+            "correct_layer_attribution": true,
+            "requires_cross_service_correlation": false,
+            "difficulty_score": 10,
+            "trap_count": 4
+        }
+    },
+    {
+        "fault_id": "FLT-ADV-008",
+        "category": "Configuration Error",
+        "difficulty": "hard",
+        "description": "A custom OPA Gatekeeper policy webhook starts timing out (>30s) due to a memory leak in the rego policy evaluator. Kubernetes API server has webhookTimeout=10s; after timeout, failurePolicy=Fail causes all pod creation and config update requests to be rejected with 500. New deployments halt, HPA scale-out fails silently, and crash-looping pods cannot restart — the cluster appears frozen but all running workloads continue normally.",
+        "sregym_command": "prek inject --type memory-leak --target deployment/gatekeeper-controller-manager --rate 30MB/min --duration 1200s --namespace gatekeeper-system && prek watch --metric apiserver.admission.webhook.duration_seconds --alert-threshold 10",
+        "expected_root_cause": "OPA Gatekeeper rego policy K8sRequiredLabels accumulated unbounded policy evaluation cache due to a missing LRU eviction in gatekeeper v3.14.0; after 18 minutes controller memory hit 2Gi limit causing GC pressure and p99 webhook latency exceeding 10s; Kubernetes API server webhook timeout (failurePolicy=Fail) then rejected all mutating/validating admission requests — blocking pod creation, config updates, and HPA-driven scale events cluster-wide.",
+        "expected_mitigation": "kubectl delete pod -n gatekeeper-system -l control-plane=controller-manager to restart Gatekeeper with clean state; temporarily patch ValidatingWebhookConfiguration gatekeeper-validating-webhook-configuration to failurePolicy=Ignore to unblock cluster operations; resume pending HPA scale events by triggering kubectl rollout restart on affected deployments; upgrade Gatekeeper to v3.14.1 which patches the cache eviction bug; add webhook latency alert (>5s p95) to gatekeeper-system monitoring.",
+        "deceptive_signals": [
+            "All running pods continue operating normally — platform team may not notice",
+            "HPA scale-out failure is silent — no error events on the HPA object",
+            "Deployment 'hang' looks like an etcd issue or API server overload",
+            "kubectl get pods shows Running for all existing pods — only new pod creates fail"
+        ],
+        "airs_evaluation": {
+            "ttd_target_seconds": 300,
+            "correct_layer_attribution": true,
+            "requires_cross_service_correlation": true,
+            "difficulty_score": 8,
+            "trap_count": 4
+        }
+    },
+    {
+        "fault_id": "FLT-CTXT-001",
+        "category": "Threshold-Contextual: Transient Noise",
+        "difficulty": "medium",
+        "description": "Exactly two database query lock-wait timeouts are injected over a 5-minute window against the payments-db service, producing two error log lines with no corresponding spike in DB CPU, connection pool utilization, or query queue depth. All correlated infrastructure metrics remain within normal operating bounds. This scenario evaluates AIRS restraint: the correct behaviour is to observe the timeouts, confirm the absence of corroborating degradation signals, and log the events as transient noise requiring no mitigation. A false-positive page or mitigation action (e.g., restarting PgBouncer, scaling read replicas) is scored as a failure.",
+        "sregym_command": "prek inject --type db-timeout --target svc/payments-db --query-timeout 8000ms --count 2 --interval 90s --no-cpu-spike --no-pool-exhaust --duration 300s --namespace production",
+        "expected_root_cause": "Intermittent advisory lock-wait contention caused by a short-lived, low-priority background vacuum job (autovacuum on the orders table) briefly holding a ShareUpdateExclusiveLock; the two timeouts occurred during the vacuum's lock acquisition window; the application's retry logic resolved both requests successfully within one retry; no structural database degradation is present.",
+        "expected_mitigation": "No mitigation required. AIRS should log: 'database_query_timeout observed (count=2, window=300s); corroborating metrics absent (DB CPU nominal, pool utilization < 40%, queue depth < 5); classifying as transient lock-wait noise. Monitoring window extended by 5 minutes for re-evaluation.' No on-call page should be generated.",
+        "airs_evaluation": {
+            "correct_outcome": "no_action",
+            "scoring_dimension": "restraint",
+            "restraint_pass_condition": "AIRS does not generate a RootCauseHypothesis with confidence > 0.4 AND does not trigger any remediation action",
+            "false_positive_penalty": true,
+            "temporal_spine_required": false,
+            "ttd_target_seconds": null,
+            "requires_cross_service_correlation": false,
+            "difficulty_score": 5,
+            "trap_count": 2,
+            "traps": [
+                "Isolated database timeout error log is visually identical to the first log of a real DB outage",
+                "R5c corroboration-discount must fire correctly to lower hypothesis confidence below page threshold"
+            ]
+        }
+    },
+    {
+        "fault_id": "FLT-CTXT-002",
+        "category": "Threshold-Contextual: Systemic Signal",
+        "difficulty": "hard",
+        "description": "A background job executes a heavy, unindexed analytical query against the payments-db, causing a table scan on the 18M-row transactions table. Over a 3-minute window, the sustained query load causes: (1) DB CPU to spike from 12% to 88%, (2) the lock-wait timeout error rate to climb to 15% of all DB calls (sustained, not spiky), (3) query queue depth to rise from 3 to 340. The fault is designed to test AIRS temporal reasoning: the rate-of-change of timeouts over time (not the first timeout occurrence) is the decisive signal. AIRS must observe the trend before acting, not jump on the first timeout.",
+        "sregym_command": "prek inject --type unindexed-query --target svc/payments-db --table transactions --rows 18000000 --duration 180s --sustained-load --cpu-target 88% --timeout-rate 15% --queue-depth-target 340 --namespace production",
+        "expected_root_cause": "An ad-hoc analytical query launched by the finance-reconciliation-job (CronJob finance/reconciliation-cron, schedule 0 14 * * *) executed SELECT * FROM transactions WHERE created_at BETWEEN ... ORDER BY amount without using the idx_transactions_created_at index due to a stale query planner statistics (last ANALYZE run 12 days ago); sequential scan on 18M rows consumed 76% of DB CPU and held ShareLock for 142 seconds, elevating timeout rate from 0% to 15% over a 47-second ramp — a derivative signal AIRS must detect to distinguish this from routine lock-wait spikes.",
+        "expected_mitigation": "Kill the offending long-running query via SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE query ILIKE '%transactions%' AND query_duration > interval '30 seconds'; run ANALYZE transactions to refresh planner statistics; add index hint or query plan guide to force idx_transactions_created_at usage in reconciliation-cron; temporarily route read traffic to payments-db-replica to shed load; add alert on pg_stat_activity.query_duration > 60s correlated with DB CPU > 70%.",
+        "airs_evaluation": {
+            "correct_outcome": "diagnose_and_mitigate",
+            "scoring_dimension": "temporal_reasoning",
+            "temporal_spine_grading": {
+                "jumped_on_first_timeout": {"score_multiplier": 0.4, "label": "reactive — no temporal reasoning"},
+                "acted_after_observing_rate_trend": {"score_multiplier": 1.0, "label": "correct — waited for derivative signal"},
+                "waited_too_long_past_60s_sustained": {"score_multiplier": 0.7, "label": "sluggish — recognised signal but delayed action"}
+            },
+            "ttd_target_seconds": 120,
+            "correct_layer_attribution": true,
+            "requires_cross_service_correlation": true,
+            "difficulty_score": 7,
+            "trap_count": 3,
+            "traps": [
+                "First timeout log is identical to FLT-CTXT-001 — AIRS must not act immediately",
+                "CPU spike begins 30s after first timeout — must correlate the two metrics temporally",
+                "Finance cron job is not in the payments-db service graph — requires cross-service event attribution"
+            ]
+        }
+    }
+]
