@@ -6,6 +6,7 @@ __pycache__/
 
 # Deprecated / Old Codebase
 *.md
+!README.md
 agent/
 api/
 cli/
@@ -15,3 +16,4 @@ tests/test_evals.py
 tests/test_knowledge_graph.py
 tests/test_perception.py
 tests/test_safety.py
+SREGym
