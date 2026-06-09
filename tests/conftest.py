@@ -17,7 +17,6 @@ import pytest
 from dotenv import load_dotenv
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
-from agent.orchestrator import _build_compiled_graph
 
 load_dotenv()
 
@@ -55,8 +54,3 @@ def mock_enterprise_api():
     process.wait()
 
 
-@pytest.fixture
-async def graph() -> AsyncGenerator:
-    """Yield a compiled graph instance backed by an in-memory checkpointer."""
-    async with AsyncSqliteSaver.from_conn_string(":memory:") as checkpointer:
-        yield _build_compiled_graph(checkpointer)

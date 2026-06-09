@@ -1,0 +1,44 @@
+[
+    {
+        "fault_id": "misconfig_app_hotel_res",
+        "category": "System/Application Software Failure",
+        "description": "Container of 'geo' service pulled incorrect image.",
+        "expected_root_cause": "The 'geo' service deployment is configured to pull the wrong Docker image (or wrong tag), causing the pod to crash-loop and fail to serve requests.",
+        "expected_mitigation": "Update the deployment image for 'geo' service to the correct tag."
+    },
+    {
+        "fault_id": "liveness_probe_misconfiguration_hotel_reservation",
+        "category": "Misconfiguration Failure",
+        "description": "Misconfigured healthz port, making liveness probe fail, therefore pods of recommendation service will be caught into continuously restart cycle",
+        "expected_root_cause": "The liveness probe on the 'recommendation' deployment specifies the wrong port. The orchestrator thinks the pod is dead and repeatedly restarts it (CrashLoopBackOff).",
+        "expected_mitigation": "Fix the port in the liveness probe configuration for the recommendation service."
+    },
+    {
+        "fault_id": "missing_configmap_hotel_reservation",
+        "category": "Cloud Management System Failure",
+        "description": "'mongo-geo-script' configmap is missed in 'mongodb-geo' service",
+        "expected_root_cause": "The ConfigMap 'mongo-geo-script' was deleted or never created. The 'mongodb-geo' pod fails to create because it references a missing ConfigMap volume.",
+        "expected_mitigation": "Create or restore the 'mongo-geo-script' ConfigMap."
+    },
+    {
+        "fault_id": "missing_service_hotel_reservation",
+        "category": "Cloud Management System Failure",
+        "description": "'mongodb-rate' service is missed in 'hotel-reservation' app",
+        "expected_root_cause": "The Kubernetes Service object for 'mongodb-rate' is missing. The 'rate' application cannot connect to its database via DNS, resulting in connection timeouts and 500 errors for rate lookups.",
+        "expected_mitigation": "Apply the Service definition for 'mongodb-rate'."
+    },
+    {
+        "fault_id": "init_container_dependency_hang_hotel_reservation",
+        "category": "Misconfiguration Failure",
+        "description": "An init container on the frontend deployment loops on nslookup against a non-existent service (legacy-config-service), so every new pod stays in Init:0/1 and the rollout stalls indefinitely",
+        "expected_root_cause": "An init container in the 'frontend' pod is hanging because it is trying to reach a non-existent network address ('legacy-config-service'). This blocks the main application container from ever starting.",
+        "expected_mitigation": "Remove the broken init container from the deployment or fix the service reference."
+    },
+    {
+        "fault_id": "service_wrong_pod_selection_hotel_reservation",
+        "category": "Misconfiguration Failure",
+        "description": "The frontend Service selector is broadened so it selects both intended frontend pods and an unintended search pod, causing non-empty but polluted endpoints and possible request failures.",
+        "expected_root_cause": "The 'frontend' Service selector has been misconfigured to improperly match other unrelated pods (like 'search'). Traffic routed to the frontend service is load-balanced to the wrong pods, resulting in intermittent request failures.",
+        "expected_mitigation": "Tighten the selector for the 'frontend' Service to only match frontend application pods."
+    }
+]

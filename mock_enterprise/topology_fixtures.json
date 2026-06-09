@@ -171,6 +171,116 @@
       "owner": "external",
       "on_call": "N/A",
       "depends_on": []
+    },
+    {
+      "name": "order-processor",
+      "type": "service",
+      "tier": 3,
+      "namespace": "production",
+      "health_status": "healthy",
+      "owner": "platform-team",
+      "on_call": "alice@company.com",
+      "depends_on": []
+    },
+    {
+      "name": "checkout-vs",
+      "type": "service",
+      "tier": 3,
+      "namespace": "production",
+      "health_status": "healthy",
+      "owner": "platform-team",
+      "on_call": "alice@company.com",
+      "depends_on": []
+    },
+    {
+      "name": "inventory-svc",
+      "type": "service",
+      "tier": 3,
+      "namespace": "production",
+      "health_status": "healthy",
+      "owner": "platform-team",
+      "on_call": "alice@company.com",
+      "depends_on": []
+    },
+    {
+      "name": "ntp-sync",
+      "type": "service",
+      "tier": 3,
+      "namespace": "kube-system",
+      "health_status": "healthy",
+      "owner": "platform-team",
+      "on_call": "alice@company.com",
+      "depends_on": []
+    },
+    {
+      "name": "otel-collector-config",
+      "type": "service",
+      "tier": 3,
+      "namespace": "monitoring",
+      "health_status": "healthy",
+      "owner": "platform-team",
+      "on_call": "alice@company.com",
+      "depends_on": []
+    },
+    {
+      "name": "api-gateway-tls",
+      "type": "service",
+      "tier": 3,
+      "namespace": "production",
+      "health_status": "healthy",
+      "owner": "platform-team",
+      "on_call": "alice@company.com",
+      "depends_on": []
+    },
+    {
+      "name": "log-rotator",
+      "type": "service",
+      "tier": 3,
+      "namespace": "kube-system",
+      "health_status": "healthy",
+      "owner": "platform-team",
+      "on_call": "alice@company.com",
+      "depends_on": []
+    },
+    {
+      "name": "wallet-svc",
+      "type": "service",
+      "tier": 3,
+      "namespace": "production",
+      "health_status": "healthy",
+      "owner": "platform-team",
+      "on_call": "alice@company.com",
+      "depends_on": []
+    },
+    {
+      "name": "catalogue-svc",
+      "type": "service",
+      "tier": 3,
+      "namespace": "production",
+      "health_status": "healthy",
+      "owner": "platform-team",
+      "on_call": "alice@company.com",
+      "depends_on": []
+    },
+    {
+      "name": "gatekeeper-controller-manager",
+      "type": "service",
+      "tier": 3,
+      "namespace": "gatekeeper-system",
+      "health_status": "healthy",
+      "owner": "platform-team",
+      "on_call": "alice@company.com",
+      "depends_on": []
+    },
+    {
+      "name": "unknown",
+      "type": "service",
+      "tier": 3,
+      "namespace": "production",
+      "health_status": "healthy",
+      "owner": "platform-team",
+      "on_call": "alice@company.com",
+      "depends_on": []
     }
   ],
   "on_call_schedules": [

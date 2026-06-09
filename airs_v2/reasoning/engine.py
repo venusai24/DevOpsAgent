@@ -147,7 +147,7 @@ class ReasoningEngine:
         raw_hypotheses = hyp_engine.generate(perception_report)
         
         tracer.record_hypotheses_generated(
-            [f"{h.candidate_node} ({h.source})" for h in raw_hypotheses]
+            [f"{h.candidate_node} ({h.template_key})" for h in raw_hypotheses]
         )
 
         logger.info(

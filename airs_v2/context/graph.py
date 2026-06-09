@@ -46,8 +46,23 @@ coroutine (the topology_agent_node), so no locking is required in Stage 2.
 
 from __future__ import annotations
 
+import os
 import json
 import logging
+from collections import deque
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Optional
+
+import networkx as nx
+from pydantic import BaseModel, Field
+
+try:
+    from kubernetes import client, config
+    K8S_AVAILABLE = True
+except ImportError:
+    K8S_AVAILABLE = False
+
 from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
@@ -238,7 +253,13 @@ class ContextGraph:
         self._correlations: list[dict] = []
         self._path = fixtures_path or _FIXTURES_PATH
         self._loaded = False
-        self.load_from_fixtures(self._path)
+        
+        if os.environ.get("AIRS_USE_K8S", "false").lower() == "true":
+            ns_env = os.environ.get("AIRS_K8S_NAMESPACES", "production,default")
+            namespaces = [ns.strip() for ns in ns_env.split(",") if ns.strip()]
+            self.load_from_k8s(namespaces)
+        else:
+            self.load_from_fixtures(self._path)
 
     # ------------------------------------------------------------------
     # Graph loading
@@ -296,6 +317,138 @@ class ContextGraph:
             "[ContextGraph] Loaded %d nodes, %d edges from %s",
             self._g.number_of_nodes(), self._g.number_of_edges(), path.name,
         )
+
+    def load_from_k8s(self, namespaces: list[str]) -> None:
+        """Seed the graph dynamically from a live Kubernetes cluster."""
+        if not K8S_AVAILABLE:
+            logger.error("[ContextGraph] kubernetes package not installed. Cannot use AIRS_USE_K8S=true.")
+            return
+
+        try:
+            try:
+                config.load_incluster_config()
+            except Exception:
+                config.load_kube_config()
+        except Exception as e:
+            logger.error("[ContextGraph] Failed to load K8s config: %s", e)
+            return
+
+        v1 = client.CoreV1Api()
+        apps_v1 = client.AppsV1Api()
+        custom_v1 = client.CustomObjectsApi()
+        
+        # 1. Discover Workloads (Deployments, StatefulSets, DaemonSets)
+        workloads = []
+        for ns in namespaces:
+            try:
+                deps = apps_v1.list_namespaced_deployment(namespace=ns)
+                for item in deps.items:
+                    workloads.append(("deployment", item))
+                
+                sts = apps_v1.list_namespaced_stateful_set(namespace=ns)
+                for item in sts.items:
+                    workloads.append(("statefulset", item))
+                    
+                ds = apps_v1.list_namespaced_daemon_set(namespace=ns)
+                for item in ds.items:
+                    workloads.append(("daemonset", item))
+            except Exception as e:
+                logger.warning("[ContextGraph] Error fetching workloads in %s: %s", ns, e)
+
+        # 2. Add nodes for workloads
+        for kind, item in workloads:
+            name = item.metadata.name
+            ns = item.metadata.namespace
+            
+            # Type inference from labels
+            labels = item.metadata.labels or {}
+            comp = labels.get("app.kubernetes.io/component", "")
+            app_name = labels.get("app.kubernetes.io/name", "")
+            
+            node_type = "service"
+            if "database" in comp.lower() or "database" in app_name.lower() or "postgres" in name or "db" in name:
+                node_type = "database"
+            elif "cache" in comp.lower() or "cache" in app_name.lower() or "redis" in name:
+                node_type = "cache"
+                
+            # Health status and replicas
+            health = "unknown"
+            replicas = 1
+            if kind == "deployment" or kind == "statefulset":
+                replicas = item.spec.replicas or 1
+                ready = item.status.ready_replicas or 0
+                health = "healthy" if ready >= replicas else ("critical" if ready == 0 else "degraded")
+            elif kind == "daemonset":
+                replicas = item.status.desired_number_scheduled or 1
+                ready = item.status.number_ready or 0
+                health = "healthy" if ready >= replicas else ("critical" if ready == 0 else "degraded")
+                
+            self._g.add_node(name,
+                             node_type=node_type,
+                             tier=3,
+                             health_status=health,
+                             owner="unknown",
+                             namespace=ns,
+                             on_call="",
+                             replicas=replicas,
+                             error_rate_pct=0.0)
+
+        # 3. Discover Services and map Selectors
+        for ns in namespaces:
+            try:
+                svcs = v1.list_namespaced_service(namespace=ns)
+                for svc in svcs.items:
+                    svc_name = svc.metadata.name
+                    if not self._g.has_node(svc_name):
+                        self._g.add_node(svc_name, node_type="service", tier=3, health_status="healthy",
+                                         owner="unknown", namespace=ns, on_call="", replicas=1)
+                    
+                    # Map Service -> Workload via selectors
+                    if svc.spec.selector:
+                        for kind, w in workloads:
+                            if w.metadata.namespace == ns and w.metadata.labels:
+                                match = all(w.metadata.labels.get(k) == v for k, v in svc.spec.selector.items())
+                                if match:
+                                    self._g.add_edge(svc_name, w.metadata.name, protocol="http", error_rate_pct=0.0, latency_p99_ms=0.0, is_critical_path=True)
+            except Exception as e:
+                logger.warning("[ContextGraph] Error fetching services in %s: %s", ns, e)
+
+        # 4. Extract Edges using Istio CRDs (VirtualServices)
+        for ns in namespaces:
+            try:
+                vs_list = custom_v1.list_namespaced_custom_object(
+                    group="networking.istio.io",
+                    version="v1alpha3",  # Usually v1beta1 or v1alpha3
+                    namespace=ns,
+                    plural="virtualservices"
+                )
+            except Exception:
+                try:
+                    vs_list = custom_v1.list_namespaced_custom_object(
+                        group="networking.istio.io",
+                        version="v1beta1",
+                        namespace=ns,
+                        plural="virtualservices"
+                    )
+                except Exception as e:
+                    logger.debug("[ContextGraph] Could not fetch VirtualServices in %s: %s", ns, e)
+                    continue
+
+            for vs in vs_list.get("items", []):
+                vs_name = vs.get("metadata", {}).get("name")
+                if not self._g.has_node(vs_name):
+                    self._g.add_node(vs_name, node_type="service", tier=3, health_status="healthy", owner="unknown", namespace=ns)
+                
+                http_routes = vs.get("spec", {}).get("http", [])
+                for route in http_routes:
+                    for dst in route.get("route", []):
+                        host = dst.get("destination", {}).get("host")
+                        if host:
+                            self._g.add_edge(vs_name, host, protocol="http", error_rate_pct=0.0, latency_p99_ms=0.0, is_critical_path=True)
+                            
+        self._loaded = True
+        logger.info("[ContextGraph] Loaded K8s topology: %d nodes, %d edges", self._g.number_of_nodes(), self._g.number_of_edges())
+
 
     # ------------------------------------------------------------------
     # Core topology queries
