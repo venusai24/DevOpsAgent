@@ -253,6 +253,209 @@ class ExecutionEngine:
         return result
 
     # ------------------------------------------------------------------
+    # Stage 5: execute_plan_with_confidence
+    # ------------------------------------------------------------------
+
+    async def execute_plan_with_confidence(
+        self,
+        plan: RemediationPlan,
+        *,
+        incident_analysis=None,         # Optional[IncidentAnalysis]
+        rag_engine=None,                # Optional[RAGEngine]
+        now: datetime | None = None,
+        health_overrides: dict[str, bool] | None = None,
+    ) -> ExecutionResult:
+        """
+        Stage 5 execution path: RAG + Composite Confidence + HITL.
+
+        Orchestration:
+          ① Policy evaluation (unchanged from execute_plan)
+          ② Action-phase RAG retrieval (if rag_engine provided)
+          ③ Composite confidence scoring (ConfidenceEngine)
+          ④ HITL routing decision based on threshold
+          ⑤ If HITL: send enriched Slack payload, wait for HumanFeedback
+          ⑥ Health checks + rollback trigger
+          ⑦ Build enriched ExecutionResult with all Stage 5 fields
+
+        Parameters
+        ----------
+        plan               : The RemediationPlan to evaluate.
+        incident_analysis  : IncidentAnalysis carrying rag_confidence_boost
+                             and analysis_markdown from the Reasoning Engine.
+        rag_engine         : Optional RAGEngine for action-phase retrieval.
+        now                : Reference timestamp (for business-hours policy).
+        health_overrides   : Injected health-check outcomes for testing.
+        """
+        from airs_v2.action.confidence import ConfidenceEngine
+
+        if now is None:
+            now = datetime.now(timezone.utc)
+
+        conf_engine = ConfidenceEngine()
+
+        # ── ① Policy evaluation ────────────────────────────────────────────
+        decisions: list[PolicyDecision] = self._policy.evaluate(plan, now=now)
+
+        # ── ② Action-phase RAG retrieval ───────────────────────────────────
+        action_rag_context = ""
+        rag_context_used = False
+        rag_boost = 0.0
+
+        if rag_engine is not None and incident_analysis is not None:
+            try:
+                rag_response = rag_engine.retrieve_action_context(
+                    analysis_markdown=incident_analysis.analysis_markdown,
+                    focal_service=incident_analysis.focal_service,
+                    incident_type=(
+                        incident_analysis.root_cause_candidates[0].template_key
+                        if incident_analysis.root_cause_candidates
+                        else ""
+                    ),
+                    top_k=3,
+                )
+                action_rag_context = rag_response.to_few_shot_context(max_results=3)
+                rag_boost = incident_analysis.rag_confidence_boost
+                rag_context_used = bool(rag_response.results)
+            except Exception as exc:
+                logger.warning("[ExecutionEngine] Action RAG failed (non-fatal): %s", exc)
+
+        # ── ③ Composite confidence ─────────────────────────────────────────
+        diagnosis_conf = (
+            float(incident_analysis.overall_confidence)
+            if incident_analysis is not None
+            else 0.5
+        )
+        policy_pass_rate = conf_engine.compute_policy_pass_rate(decisions)
+        composite = conf_engine.compute_composite_confidence(
+            diagnosis_confidence=diagnosis_conf,
+            rag_boost=rag_boost,
+            policy_pass_rate=policy_pass_rate,
+        )
+
+        # ── ④ HITL routing decision ────────────────────────────────────────
+        hitl_required = conf_engine.requires_hitl(composite)
+        hitl_triggered = False
+        human_feedback = None
+
+        # ── ⑤ Route decisions ──────────────────────────────────────────────
+        approved: list[str] = []
+        pending_human: list[str] = []
+        rejected: list[str] = []
+        action_by_id = {a.action_id: a for a in plan.actions}
+        tracer = ObservabilityTracer.get_instance()
+        analysis_md = incident_analysis.analysis_markdown if incident_analysis else ""
+
+        for decision in decisions:
+            action = action_by_id[decision.action_id]
+
+            if decision.decision == DecisionOutcome.AUTO_APPROVED and not hitl_required:
+                approved.append(decision.action_id)
+                logger.info(
+                    "[ExecutionEngine] AUTO_APPROVED action_id=%s confidence=%.3f",
+                    decision.action_id,
+                    composite,
+                )
+                tracer.record_action_taken(
+                    f"execute_{action.action_kind}",
+                    f"AUTO_APPROVED (conf={composite:.3f}): {action.target_resource}",
+                )
+
+            elif (
+                decision.decision == DecisionOutcome.PENDING_HUMAN
+                or hitl_required
+            ):
+                # HITL — send enriched Slack payload
+                hitl_triggered = True
+                message_ts = await self._slack.send_approval_request(
+                    action,
+                    decision.violations,
+                    composite_confidence=composite,
+                    analysis_markdown=analysis_md,
+                    rag_context=action_rag_context,
+                )
+                decision.slack_message_ts = message_ts
+                pending_human.append(decision.action_id)
+
+                # Await structured HumanFeedback
+                feedback = await self._slack.wait_for_response(
+                    message_ts=message_ts,
+                    timeout_s=3600.0,
+                )
+                if human_feedback is None:
+                    human_feedback = feedback
+
+                logger.info(
+                    "[ExecutionEngine] HITL action_id=%s decision=%s reviewer=%s",
+                    decision.action_id,
+                    getattr(feedback, "decision", "unknown"),
+                    getattr(feedback, "reviewer_id", ""),
+                )
+                tracer.record_action_taken(
+                    f"hitl_{action.action_kind}",
+                    f"PENDING_HUMAN (conf={composite:.3f}): slack_ts={message_ts}",
+                )
+
+            else:  # REJECTED
+                rejected.append(decision.action_id)
+                logger.warning(
+                    "[ExecutionEngine] REJECTED action_id=%s violations=%s",
+                    decision.action_id,
+                    [v.rule_id for v in decision.violations],
+                )
+                tracer.record_action_taken(
+                    f"rejected_{action.action_kind}",
+                    f"REJECTED: {[v.rule_id for v in decision.violations]}",
+                )
+
+        # ── ⑥ Health checks ────────────────────────────────────────────────
+        probe_targets = self._resolve_probe_targets(plan, approved)
+        health_results = await self._health.run_checks(
+            probe_targets, _inject_results=health_overrides
+        )
+        rollback_triggered = False
+        rollback_reason = ""
+        if HealthMonitor.any_unhealthy(health_results):
+            rollback_triggered = True
+            unhealthy = HealthMonitor.unhealthy_services(health_results)
+            rollback_reason = (
+                f"post_execution_health_check_failed: "
+                f"services [{', '.join(unhealthy)}] reported unhealthy."
+            )
+
+        # ── ⑦ Build enriched ExecutionResult ──────────────────────────────
+        result = ExecutionResult(
+            plan_id=plan.plan_id,
+            incident_id=plan.incident_id,
+            policy_decisions=decisions,
+            actions_approved=approved,
+            actions_pending_human=pending_human,
+            actions_rejected=rejected,
+            health_checks=health_results,
+            rollback_triggered=rollback_triggered,
+            rollback_reason=rollback_reason,
+            # Stage 5 fields
+            composite_confidence=composite,
+            rag_context_used=rag_context_used,
+            hitl_triggered=hitl_triggered,
+            human_feedback=human_feedback,
+        )
+
+        logger.info(
+            "[ExecutionEngine] DONE (confidence) plan_id=%s composite=%.3f "
+            "hitl=%s approved=%d pending=%d rejected=%d rollback=%s",
+            plan.plan_id,
+            composite,
+            hitl_triggered,
+            len(approved),
+            len(pending_human),
+            len(rejected),
+            rollback_triggered,
+        )
+        return result
+
+
+
+    # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
 

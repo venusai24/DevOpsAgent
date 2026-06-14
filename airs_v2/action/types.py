@@ -311,3 +311,15 @@ class ExecutionResult(BaseModel):
     completed_at: str = Field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat()
     )
+
+    # ── Stage 5: HITL / RAG audit fields ─────────────────────────────────────
+    # Populated by execute_plan_with_confidence(). Defaults preserve backwards
+    # compatibility when using the legacy execute_plan() path.
+    composite_confidence: float = 0.0
+    """Composite confidence score from ConfidenceEngine (0.0–1.0)."""
+    rag_context_used: bool = False
+    """True if a RAGEngine was active and returned at least one result."""
+    hitl_triggered: bool = False
+    """True if composite_confidence < threshold and Slack HITL was triggered."""
+    human_feedback: Optional[Any] = None
+    """HumanFeedback received from the Slack/CLI gateway (None for auto-approved)."""

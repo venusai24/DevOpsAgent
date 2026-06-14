@@ -56,4 +56,40 @@ class Settings(BaseSettings):
     # Checkpoint SQLite (local dev)
     CHECKPOINT_DB_PATH: str = "airs_checkpoint.db"
 
+    # ── Phase 5: Embedding Model ──────────────────────────────────────────────
+    # None = auto-select: GPU → BAAI/bge-large-en-v1.5, CPU → all-MiniLM-L6-v2
+    EMBEDDING_MODEL: Optional[str] = None
+
+    # ── Phase 5: RAG / Vector Store ───────────────────────────────────────────
+    CHROMA_PERSIST_DIR: str = ".chromadb_data"
+    RAG_TOP_K: int = 5                    # Final context window size after reranking
+    RAG_CANDIDATE_K: int = 50             # Broad retrieval candidates before reranking
+    RAG_MIN_SIMILARITY: float = 0.3       # Minimum cosine similarity to include
+    RAG_RERANKING_ENABLED: bool = True
+    # Sufficiency thresholds for hierarchical retrieval (skip docs if enough incidents)
+    RAG_INCIDENT_SUFFICIENCY_COUNT: int = 3
+    RAG_INCIDENT_SUFFICIENCY_SIMILARITY: float = 0.6
+    # Amendment #4: Context compression guard — Phase 2 will apply LLMLingua-2
+    # when assembled RAG context exceeds this token estimate.
+    MAX_RAG_CONTEXT_TOKENS: int = 8000
+
+    # ── Phase 5: Reranker (Amendment #3) ─────────────────────────────────────
+    # Phase 1 default: ms-marco-MiniLM-L-6-v2 (CPU-friendly, fast)
+    # Phase 2 upgrade: BAAI/bge-reranker-v2-m3 (higher accuracy, GPU recommended)
+    RERANKER_MODEL: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+
+    # ── Phase 5: Knowledge Graph ──────────────────────────────────────────────
+    GRAPH_BACKEND: str = "networkx"       # "neo4j" for Phase 2 production
+    GRAPH_PERSIST_PATH: str = ".knowledge_graph.json"
+
+    # ── Phase 5: HITL Confidence Gate ────────────────────────────────────────
+    ACTION_CONFIDENCE_THRESHOLD: float = 0.75
+    HITL_TIMEOUT_S: float = 3600.0        # 1 hour
+
+    # ── Phase 5: Learning Loop ────────────────────────────────────────────────
+    LEARNING_LOOP_ENABLED: bool = True
+
+    # ── Phase 5: Corpus ───────────────────────────────────────────────────────
+    CORPUS_DIR: str = "Corpus"            # Root of the static document corpus
+
 settings = Settings()

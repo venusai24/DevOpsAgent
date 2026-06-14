@@ -36,7 +36,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Optional
 
 from airs_v2.action.types import PolicyViolation, RemediationAction
 
@@ -70,6 +70,11 @@ class MockSlackGateway:
         self,
         action: RemediationAction,
         violations: list[PolicyViolation],
+        *,
+        composite_confidence: float = 0.0,
+        analysis_markdown: str = "",
+        rag_context: str = "",
+        thread_id: str = "",
     ) -> str:
         """
         Send a human-approval request for a high-risk action.
@@ -79,8 +84,15 @@ class MockSlackGateway:
         action:
             The action requiring human sign-off.
         violations:
-            Any soft-gate violations that triggered the routing (may be empty
-            if the action was routed purely by risk level via PE-R4).
+            Any soft-gate violations that triggered the routing.
+        composite_confidence:
+            Stage 5: composite confidence score from ConfidenceEngine.
+        analysis_markdown:
+            Stage 5: full incident analysis for Slack Block Kit rich display.
+        rag_context:
+            Stage 5: retrieved RAG context shown in the Slack modal.
+        thread_id:
+            Stage 5: thread ID for durable async resume.
 
         Returns
         -------
@@ -99,6 +111,10 @@ class MockSlackGateway:
             "estimated_blast_radius": action.estimated_blast_radius,
             "runbook_ref": action.runbook_ref,
             "violations": [v.model_dump() for v in violations],
+            # Stage 5 fields
+            "composite_confidence": composite_confidence,
+            "analysis_markdown_preview": analysis_markdown[:500] if analysis_markdown else "",
+            "rag_context_preview": rag_context[:300] if rag_context else "",
             "sent_at": sent_at,
             "message_ts": message_ts,
         }
@@ -107,16 +123,38 @@ class MockSlackGateway:
 
         logger.info(
             "[SlackGateway] APPROVAL REQUEST action_id=%s kind=%s ns=%s "
-            "risk=%s blast_radius=%d message_ts=%s",
+            "risk=%s blast_radius=%d confidence=%.3f message_ts=%s",
             action.action_id,
             action.kind.value,
             action.target_namespace,
             action.risk_level.value,
             action.estimated_blast_radius,
+            composite_confidence,
             message_ts,
         )
 
         return message_ts
+
+    async def wait_for_response(
+        self,
+        message_ts: str,
+        timeout_s: float = 3600.0,
+    ) -> object:
+        """
+        Wait for and return the human's response as a HumanFeedback.
+
+        Mock implementation: auto-approves immediately.
+        ProductionSlackGateway will poll the Slack API for a response.
+        """
+        from airs_v2.action.feedback import FeedbackCollector
+
+        logger.info(
+            "[SlackGateway] Mock auto-approve for message_ts=%s", message_ts
+        )
+        collector = FeedbackCollector()
+        return collector.create_auto_feedback(
+            auto_approve=True, reviewer_id="mock_auto_approver"
+        )
 
     # ------------------------------------------------------------------
     # Test helpers

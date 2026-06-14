@@ -93,10 +93,19 @@ class ReasoningEngine:
         all topology data is read from this object directly — no MCP subprocess
         is spawned.  When ``None`` (default), the engine uses ``ContextMCPClient``
         to communicate with the running MCP server.
+    rag_engine:
+        Optional ``RAGEngine`` instance.  When provided, RAG retrieval is
+        executed after hypothesis ranking (Stage 5 augmentation).  When
+        ``None`` (default), the engine behaves identically to pre-Stage-5 code.
     """
 
-    def __init__(self, graph: Optional[ContextGraph] = None) -> None:
+    def __init__(
+        self,
+        graph: Optional[ContextGraph] = None,
+        rag_engine=None,        # Optional[RAGEngine]
+    ) -> None:
         self._injected_graph = graph
+        self._rag_engine = rag_engine
 
     # ------------------------------------------------------------------
     # Public API
@@ -198,14 +207,29 @@ class ReasoningEngine:
             confidence=overall_confidence,
         )
 
+        # ── ⑧ RAG context retrieval (Stage 5) ────────────────────────
+        # Runs AFTER hypothesis ranking; no HITL in this phase.
+        rag_context, rag_boost = self._retrieve_rag_context(
+            analysis_markdown=analysis_md,
+            focal_service=focal_service,
+            incident_type=root_cause_candidates[0].template_key
+            if root_cause_candidates
+            else "",
+        )
+        boosted_confidence = round(
+            min(1.0, overall_confidence + rag_boost), 4
+        )
+
         analysis = IncidentAnalysis(
             focal_service=focal_service,
             causal_graph=causal_graph,
             root_cause_candidates=root_cause_candidates,
             rejected_hypotheses=rejected_models,
             symbolic_path=symbolic_path,
-            overall_confidence=round(overall_confidence, 4),
+            overall_confidence=boosted_confidence,
             analysis_markdown=analysis_md,
+            rag_context=rag_context,
+            rag_confidence_boost=rag_boost,
         )
 
         final_conclusion = (
@@ -225,6 +249,51 @@ class ReasoningEngine:
             symbolic_path,
         )
         return analysis
+
+    # ------------------------------------------------------------------
+    # RAG context retrieval (Stage 5)
+    # ------------------------------------------------------------------
+
+    def _retrieve_rag_context(
+        self,
+        analysis_markdown: str,
+        focal_service: str,
+        incident_type: str,
+    ) -> tuple[str, float]:
+        """
+        Retrieve RAG context for the Diagnosis Phase.
+
+        Returns
+        -------
+        (rag_context_string, confidence_boost)
+          Both are empty / 0.0 when RAG is disabled.
+
+        Phase isolation: this method never triggers HITL.
+        """
+        if self._rag_engine is None:
+            return "", 0.0
+
+        try:
+            tracer = ObservabilityTracer.get_instance()
+            response = self._rag_engine.retrieve_diagnosis_context(
+                analysis_markdown=analysis_markdown,
+                focal_service=focal_service,
+                incident_type=incident_type,
+            )
+            rag_context = response.to_few_shot_context(max_results=3)
+            rag_boost = self._rag_engine.compute_rag_confidence_boost(response)
+            logger.info(
+                "[ReasoningEngine] RAG: %d results, boost=%.4f, fallback=%s",
+                len(response.results),
+                rag_boost,
+                response.hierarchical_fallback_triggered,
+            )
+            return rag_context, rag_boost
+        except Exception as exc:
+            logger.warning(
+                "[ReasoningEngine] RAG retrieval failed (non-fatal): %s", exc
+            )
+            return "", 0.0
 
     # ------------------------------------------------------------------
     # Topology context builders

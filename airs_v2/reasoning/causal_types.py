@@ -341,3 +341,12 @@ class IncidentAnalysis(BaseModel):
     analyzed_at: str = Field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat()
     )
+
+    # ── Stage 5: RAG augmentation fields ─────────────────────────────────────
+    # Populated by ReasoningEngine when a RAGEngine is provided.
+    # Empty string / 0.0 when RAG is disabled (backwards-compatible default).
+    rag_context: str = ""
+    """Formatted few-shot context from the RAG retrieval (injected into LLM prompt)."""
+    rag_confidence_boost: float = Field(default=0.0, ge=0.0, le=0.25)
+    """Additional confidence from RAG evidence quality; added to overall_confidence."""
+

@@ -17,3 +17,9 @@ tests/test_knowledge_graph.py
 tests/test_perception.py
 tests/test_safety.py
 SREGym
+=0.5.0
+=2.7.0
+EvalGuide.txt
+.gitignore
+AIRS_CONTEXT/DESIGN_DECISIONS_RESEARCH_ARCHIVE.zip
+notes.txt
