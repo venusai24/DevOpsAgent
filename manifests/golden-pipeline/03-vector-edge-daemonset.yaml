@@ -1,0 +1,210 @@
+# ═══════════════════════════════════════════════════════════════
+# 03-vector-edge-daemonset.yaml
+# Golden Blueprint — Vector Edge DaemonSet
+# ═══════════════════════════════════════════════════════════════
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: vector-edge
+  namespace: observability
+  labels:
+    app.kubernetes.io/name: vector-edge
+    app.kubernetes.io/component: edge-agent
+    app.kubernetes.io/part-of: golden-pipeline
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: vector-edge
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: "25%"
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: vector-edge
+        app.kubernetes.io/component: edge-agent
+        app.kubernetes.io/part-of: golden-pipeline
+      annotations:
+        # Prometheus scrape config for pipeline self-monitoring
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9598"
+        prometheus.io/path: "/metrics"
+    spec:
+      serviceAccountName: vector-edge
+      priorityClassName: telemetry-node-critical
+      # Tolerate all taints — logging must run on EVERY node,
+      # including tainted control-plane and GPU nodes
+      tolerations:
+        - operator: Exists
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: vector
+          image: timberio/vector:0.43.1-distroless-libc
+          args:
+            - "--config-dir"
+            - "/etc/vector/"
+            - "--watch-config"  # Hot-reload on ConfigMap change
+          env:
+            - name: VECTOR_SELF_NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            # Prometheus metrics endpoint
+            - name: VECTOR_INTERNAL_LOG_RATE_LIMIT
+              value: "5"
+          ports:
+            - name: prom-metrics
+              containerPort: 9598
+              protocol: TCP
+          # ── Resource Limits ───────────────────────────────
+          # Guaranteed QoS: requests == limits
+          # This prevents CPU throttling and guarantees the
+          # DaemonSet is in the Guaranteed QoS class, making
+          # it the last to be evicted under memory pressure.
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+          # ── Volume Mounts ─────────────────────────────────
+          volumeMounts:
+            - name: config
+              mountPath: /etc/vector/
+              readOnly: true
+            - name: data-dir
+              mountPath: /vector-data-dir
+            - name: var-log-pods
+              mountPath: /var/log/pods
+              readOnly: true
+            - name: var-lib-docker
+              mountPath: /var/lib/docker/containers
+              readOnly: true
+          # ── Health Probes ─────────────────────────────────
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8686
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8686
+            initialDelaySeconds: 5
+            periodSeconds: 10
+      volumes:
+        - name: config
+          configMap:
+            name: vector-edge-config
+        - name: data-dir
+          hostPath:
+            path: /var/lib/vector
+            type: DirectoryOrCreate
+        - name: var-log-pods
+          hostPath:
+            path: /var/log/pods
+            type: ""
+        - name: var-lib-docker
+          hostPath:
+            path: /var/lib/docker/containers
+            type: ""
+---
+# ── ConfigMap wrapping the TOML config ──────────────────────
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vector-edge-config
+  namespace: observability
+  labels:
+    app.kubernetes.io/name: vector-edge
+    app.kubernetes.io/part-of: golden-pipeline
+  annotations:
+    # AIRS AI agent can patch this ConfigMap for dynamic verbosity overrides
+    airs.io/managed: "true"
+data:
+  vector.toml: |
+    # ═══════════════════════════════════════════════════════════════
+    # Vector Edge DaemonSet Configuration (inline for ConfigMap)
+    # See 02-vector-edge-config.toml for documented version
+    # ═══════════════════════════════════════════════════════════════
+    data_dir = "/vector-data-dir"
+
+    [api]
+    enabled = true
+    address = "0.0.0.0:8686"
+
+    [sources.kubernetes_logs]
+    type = "kubernetes_logs"
+    self_node_name = "${VECTOR_SELF_NODE_NAME}"
+    extra_label_selector = "app.kubernetes.io/name!=vector-edge"
+
+    [transforms.format_negotiate]
+    type = "remap"
+    inputs = ["kubernetes_logs"]
+    source = '''
+      .raw_message = string!(.message)
+
+      parsed, err = parse_json(.message)
+      if err == null {
+        .log_format = "json"
+        .level = downcase(
+          string(parsed.level) ??
+          string(parsed.severity) ??
+          string(parsed.loglevel) ??
+          string(parsed.log_level) ??
+          string(parsed.lvl) ??
+          "info"
+        )
+        .message = string(parsed.msg) ??
+                   string(parsed.message) ??
+                   string(parsed.log) ??
+                   string(parsed.body) ??
+                   .message
+        if exists(parsed.error) { .error_detail = string!(parsed.error) }
+        if exists(parsed.stack_trace) { .stack_trace = string!(parsed.stack_trace) }
+      } else {
+        .message = replace(string!(.message), r'\x1b\[[0-9;]*m', "")
+        .message = replace(.message, r'\x1b\[\d*[A-Za-z]', "")
+        .log_format = "text"
+        .level = if match(.message, r'(?i)^.{0,50}(FATAL|PANIC)') {
+          "fatal"
+        } else if match(.message, r'(?i)^.{0,50}(ERROR|ERR\b)') {
+          "error"
+        } else if match(.message, r'(?i)^.{0,50}(WARN|WARNING)') {
+          "warn"
+        } else if match(.message, r'(?i)^.{0,50}(DEBUG|TRACE)') {
+          "debug"
+        } else {
+          "info"
+        }
+      }
+
+      container_name = string!(.kubernetes.container_name)
+      .source = if starts_with(container_name, "init-") || starts_with(container_name, "istio-init") {
+        "init_container"
+      } else {
+        "container"
+      }
+
+      labels = .kubernetes.pod_labels
+      .service_name = string(labels."app") ??
+                      string(labels."io.kompose.service") ??
+                      string(labels."app.kubernetes.io/name") ??
+                      string(labels."app.kubernetes.io/component") ??
+                      "unknown"
+    '''
+
+    [sinks.aggregator]
+    type = "vector"
+    inputs = ["format_negotiate"]
+    address = "vector-aggregator.observability.svc.cluster.local:6000"
+    compression = true
+
+    [sinks.aggregator.buffer]
+    type = "memory"
+    max_events = 10000
+    when_full = "drop_newest"

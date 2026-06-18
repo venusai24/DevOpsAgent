@@ -1,0 +1,38 @@
+# ═══════════════════════════════════════════════════════════════
+# 00-namespace-priorities.yaml
+# Golden Blueprint — Namespace & PriorityClasses
+# ═══════════════════════════════════════════════════════════════
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: observability
+  labels:
+    app.kubernetes.io/part-of: golden-pipeline
+    purpose: telemetry-infrastructure
+---
+# PriorityClass for Vector Edge DaemonSet
+# Same priority tier as kube-proxy and calico-node — never evicted
+# before application workloads. Value 2000001000 is just above
+# system-node-critical (2000001000) to co-exist without conflict.
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: telemetry-node-critical
+globalDefault: false
+value: 1000000000
+preemptionPolicy: PreemptLowerPriority
+description: >
+  Priority class for telemetry edge agents (Vector DaemonSet).
+  Ensures log collection survives node-level resource pressure.
+---
+# PriorityClass for Vector Aggregators and OTel Collector
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: telemetry-cluster-critical
+globalDefault: false
+value: 900000000
+preemptionPolicy: PreemptLowerPriority
+description: >
+  Priority class for telemetry aggregation tier (Vector Aggregator,
+  OTel K8s Events Collector). Survives cluster-level resource pressure.

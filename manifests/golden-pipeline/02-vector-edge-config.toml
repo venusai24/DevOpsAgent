@@ -1,0 +1,165 @@
+# ═══════════════════════════════════════════════════════════════
+# Vector Edge DaemonSet Configuration
+# Golden Blueprint — Lightweight Forwarder
+#
+# Responsibilities:
+#   1. Auto-discover all pod logs (including init containers)
+#   2. Parse JSON / extract severity from unstructured text
+#   3. Strip ANSI color codes from raw text
+#   4. Tag log provenance (container vs init_container)
+#   5. Forward to Aggregator tier with ZSTD compression
+#
+# NOT responsible for:
+#   - Multiline reassembly (done at Aggregator tier)
+#   - Noise filtering (done at Aggregator tier)
+#   - Disk buffering (memory-only — DaemonSet must never consume
+#     node disk I/O that competes with container runtime log writes)
+#
+# Buffer strategy (ADR-08):
+#   Memory-only at the edge: max_events=50000, drop_newest on overflow.
+#   A dead-letter queue (DLQ) file sink captures events dropped during
+#   sustained aggregator outages for post-incident forensic recovery.
+#   The Aggregator tier uses disk buffers (5GB/3GB/2GB per tier) for
+#   durable at-least-once delivery to ClickHouse.
+# ═══════════════════════════════════════════════════════════════
+
+# ── Data Directory for Checkpointing ─────────────────────────
+data_dir = "/vector-data-dir"
+
+# ── Source: Kubernetes Logs ──────────────────────────────────
+[sources.kubernetes_logs]
+type = "kubernetes_logs"
+# Auto-discovers all pod logs including init containers via the
+# kubelet's /var/log/pods/ symlink tree. Enriches each event with:
+#   .kubernetes.pod_namespace
+#   .kubernetes.pod_name
+#   .kubernetes.pod_uid
+#   .kubernetes.container_name
+#   .kubernetes.pod_node_name
+#   .kubernetes.pod_labels
+self_node_name = "${VECTOR_SELF_NODE_NAME}"
+# Exclude Vector's own logs to prevent feedback loops
+extra_label_selector = "app.kubernetes.io/name!=vector-edge"
+
+# ── Transform: Log Format Negotiation ────────────────────────
+# Handles the reality that services emit mixed formats:
+#   - Structured JSON (Go, Node.js structured loggers)
+#   - Unstructured text with ANSI codes (dev containers)
+#   - Plain text with embedded severity (Java, Python)
+[transforms.format_negotiate]
+type = "remap"
+inputs = ["kubernetes_logs"]
+source = '''
+  # Preserve raw message for debugging
+  .raw_message = string!(.message)
+
+  # ── Attempt JSON parse ──────────────────────────────────
+  parsed, err = parse_json(.message)
+  if err == null {
+    .log_format = "json"
+
+    # Normalize severity from common JSON field names
+    # Priority: level > severity > loglevel > log_level > lvl
+    .level = downcase(
+      string(parsed.level) ??
+      string(parsed.severity) ??
+      string(parsed.loglevel) ??
+      string(parsed.log_level) ??
+      string(parsed.lvl) ??
+      "info"
+    )
+
+    # Normalize message field from common JSON field names
+    .message = string(parsed.msg) ??
+               string(parsed.message) ??
+               string(parsed.log) ??
+               string(parsed.body) ??
+               .message
+
+    # Extract structured error detail if present
+    if exists(parsed.error) {
+      .error_detail = string!(parsed.error)
+    }
+    if exists(parsed.stack_trace) {
+      .stack_trace = string!(parsed.stack_trace)
+    }
+
+  } else {
+    # ── Raw text processing ─────────────────────────────────
+    # Strip ANSI escape sequences (color codes from dev containers)
+    .message = replace(string!(.message), r'\x1b\[[0-9;]*m', "")
+    .message = replace(.message, r'\x1b\[\d*[A-Za-z]', "")
+
+    .log_format = "text"
+
+    # Regex-based severity extraction for unstructured logs
+    # Check first 50 chars to avoid false positives deep in messages
+    .level = if match(string!(.message), r'(?i)^.{0,50}(FATAL|PANIC)') {
+      "fatal"
+    } else if match(string!(.message), r'(?i)^.{0,50}(ERROR|ERR\b)') {
+      "error"
+    } else if match(string!(.message), r'(?i)^.{0,50}(WARN|WARNING)') {
+      "warn"
+    } else if match(string!(.message), r'(?i)^.{0,50}(DEBUG|TRACE)') {
+      "debug"
+    } else {
+      "info"
+    }
+  }
+
+  # ── Tag provenance ──────────────────────────────────────
+  container_name = string!(.kubernetes.container_name)
+  .source = if starts_with(container_name, "init-") || starts_with(container_name, "istio-init") {
+    "init_container"
+  } else {
+    "container"
+  }
+
+  # ── Extract service name from labels ────────────────────
+  # Mirrors the label resolution logic in live_harness.py L229-235
+  labels = .kubernetes.pod_labels
+  .service_name = string(labels."app") ??
+                  string(labels."io.kompose.service") ??
+                  string(labels."app.kubernetes.io/name") ??
+                  string(labels."app.kubernetes.io/component") ??
+                  "unknown"
+'''
+
+# ── Sink: Forward to Aggregator Tier ─────────────────────────
+[sinks.aggregator]
+type = "vector"
+inputs = ["format_negotiate"]
+address = "vector-aggregator.observability.svc.cluster.local:6000"
+compression = "zstd"
+
+# Memory-only buffer: protects the host node from disk starvation.
+# Sized at 50k events (~5 min of burst traffic) to absorb transient
+# aggregator restarts without dropping events.
+# If the Aggregator tier is unreachable beyond buffer capacity, new
+# events are dropped (DLQ sink below captures the overflow).
+[sinks.aggregator.buffer]
+type = "memory"
+max_events = 50000
+when_full = "drop_newest"
+
+# ── Sink: Dead-Letter Queue (DLQ) ─────────────────────────────
+# Captures events dropped during sustained aggregator outages.
+# Written to a daily-rotated JSON file on the node's ephemeral
+# storage for post-incident forensic recovery.
+#
+# NOTE: This sink writes to node-local disk at low volume only
+# (events that would otherwise be silently dropped). It does NOT
+# buffer the full log stream — the aggregator sink does that.
+# Recovery: kubectl cp <node-pod>:/vector-data-dir/dlq/ ./dlq/
+[sinks.dlq_local]
+type = "file"
+inputs = ["format_negotiate"]
+path = "/vector-data-dir/dlq/edge-%Y-%m-%d.ndjson"
+encoding.codec = "json"
+
+# Only write to DLQ when the aggregator buffer is full (backpressure
+# signal). Use a tiny memory buffer here so the DLQ itself never blocks.
+[sinks.dlq_local.buffer]
+type = "memory"
+max_events = 1000
+when_full = "drop_newest"

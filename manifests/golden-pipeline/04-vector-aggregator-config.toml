@@ -1,0 +1,261 @@
+# ═══════════════════════════════════════════════════════════════
+# Vector Aggregator Configuration
+# Golden Blueprint — 5-Stage Filter DAG + Tiered Routing
+#
+# Pipeline:
+#   edge_input → semantic_rescue → classify_source →
+#   drop_infra_noise → drop_probe_noise → multiline_reassembly →
+#   route_by_tier → clickhouse_{hot,warm,cold}
+# ═══════════════════════════════════════════════════════════════
+
+data_dir = "/vector-data-dir"
+
+[api]
+enabled = true
+address = "0.0.0.0:8686"
+
+# ── Source: Receive from Edge DaemonSets ─────────────────────
+[sources.edge_input]
+type = "vector"
+address = "0.0.0.0:6000"
+# Enable end-to-end acknowledgements so the aggregator confirms
+# receipt to each edge DaemonSet before the edge clears its buffer.
+# This enables true at-least-once delivery across the pipeline.
+acknowledgements.enabled = true
+
+# ══════════════════════════════════════════════════════════════
+# STAGE 1: Semantic Rescue
+# ──────────────────────────────────────────────────────────────
+# Tags .rescued=true on ANY log matching critical infrastructure
+# failure keywords, REGARDLESS of severity level. This runs FIRST
+# so all downstream filters can trivially check .rescued and pass
+# the event through unconditionally.
+#
+# Why this matters: Many legacy services (databases, proxies) log
+# catastrophic failures like "Connection Refused" or "OOMKilled"
+# at INFO level. Without semantic rescue, these would be dropped
+# by severity-based filters.
+# ══════════════════════════════════════════════════════════════
+[transforms.semantic_rescue]
+type = "remap"
+inputs = ["edge_input"]
+source = '''
+  # Comprehensive critical keyword dictionary
+  # Covers: generic errors, memory, signals, network, disk, JVM, Python
+  CRITICAL_PATTERNS = r'(?i)(error|fail|timeout|refused|oom|panic|exception|segfault|deadlock|sigkill|sigterm|circuit.?breaker|backoff|back-off|throttl|crash|abort|fatal|unreachable|connection.reset|broken.pipe|no.space|disk.full|read.only.file.system|exit.code.[1-9]|stack.?trace|null.?pointer|class.?not.?found|out.of.memory|cannot.allocate|kill|evict|unresponsive|degraded|unavailable)'
+
+  if match(string!(.message), CRITICAL_PATTERNS) {
+    .rescued = true
+    .rescue_reason = "critical_keyword_match"
+  } else {
+    .rescued = false
+    .rescue_reason = ""
+  }
+'''
+
+# ══════════════════════════════════════════════════════════════
+# STAGE 2: Source Classification
+# ──────────────────────────────────────────────────────────────
+# Tags each event as "infrastructure" or "application" based on
+# the originating namespace. Infrastructure events are subject to
+# aggressive filtering in Stage 3a; application events pass through
+# (subject only to probe noise filtering).
+# ══════════════════════════════════════════════════════════════
+[transforms.classify_source]
+type = "remap"
+inputs = ["semantic_rescue"]
+source = '''
+  INFRA_NAMESPACES = [
+    "kube-system",
+    "kube-public",
+    "kube-node-lease",
+    "ingress-nginx",
+    "cert-manager",
+    "monitoring",
+    "istio-system",
+    "calico-system",
+    "tigera-operator",
+    "gatekeeper-system",
+    "observability",
+    "logging",
+    "linkerd"
+  ]
+
+  ns = string!(.kubernetes.pod_namespace)
+  .source_class = if includes(INFRA_NAMESPACES, ns) {
+    "infrastructure"
+  } else {
+    "application"
+  }
+'''
+
+# ══════════════════════════════════════════════════════════════
+# STAGE 3a: Infrastructure Noise Gate
+# ──────────────────────────────────────────────────────────────
+# Drops routine INFO/DEBUG logs from infrastructure namespaces.
+# Rescued events ALWAYS pass through.
+# Application events ALWAYS pass through.
+# Infrastructure events pass through only if WARN+ severity.
+# ══════════════════════════════════════════════════════════════
+[transforms.drop_infra_noise]
+type = "filter"
+inputs = ["classify_source"]
+condition = '''
+  # Rescued events are sacrosanct — always pass
+  bool!(.rescued) == true ||
+  # Application events always pass — filtered only by probe gate
+  .source_class != "infrastructure" ||
+  # Infrastructure events pass only if WARN+ severity
+  includes(
+    ["error", "warn", "fatal", "critical", "panic"],
+    downcase(string!(.level ?? "info"))
+  )
+'''
+
+# ══════════════════════════════════════════════════════════════
+# STAGE 3b: Probe Noise Gate (Context-Aware)
+# ──────────────────────────────────────────────────────────────
+# Drops HTTP access log lines for health/readiness probes that
+# returned successful status codes (200/204). This is CONTEXT-AWARE:
+#   ✅ Passes: "GET /health returned 503" (error response)
+#   ❌ Drops:  "GET /healthz 200 0.001ms"  (routine success)
+#
+# This eliminates the false-negative problem in the original
+# design's naive substring matching on "/health".
+# ══════════════════════════════════════════════════════════════
+[transforms.drop_probe_noise]
+type = "filter"
+inputs = ["drop_infra_noise"]
+condition = '''
+  # Rescued events always pass
+  bool!(.rescued) == true ||
+  # Only drop lines that look like successful HTTP probe access logs
+  !(
+    match(string!(.message), r'(?i)"?(GET|HEAD|POST)\s+/(healthz?|readyz?|livez?|metrics|status|ping)[\s?"]') &&
+    match(string!(.message), r'\b(200|204)\b')
+  )
+'''
+
+# ══════════════════════════════════════════════════════════════
+# STAGE 4: Multiline Reassembly
+# ──────────────────────────────────────────────────────────────
+# Reconstructs fragmented stack traces:
+#   - Python tracebacks (starts with "Traceback" or indented "File")
+#   - Java/JVM exceptions (starts with class name or "at ")
+#   - Go panics (starts with "goroutine " or "panic:")
+#   - Generic timestamped lines (new log entry = new event)
+#
+# Runs on the Aggregator's dedicated CPU — the single-threaded
+# nature of the reduce transform is safely absorbed here.
+# ══════════════════════════════════════════════════════════════
+[transforms.multiline_reassembly]
+type = "reduce"
+inputs = ["drop_probe_noise"]
+group_by = [
+  "kubernetes.pod_namespace",
+  "kubernetes.pod_name",
+  "kubernetes.container_name"
+]
+merge_strategies.message = "concat_newline"
+# A new log entry starts with: timestamp, log level prefix, JSON
+# object, Python traceback, Go panic, or Java exception class
+starts_when = '''
+  match(string!(.message), r'^(\d{4}[-/]\d{2}[-/]\d{2}|[A-Z][a-z]{2}\s+\d|[A-Z]{2,5}\s+[\[|(]|\{"|Traceback|Exception in|goroutine\s+\d|panic:)')
+'''
+expire_after_ms = 3000
+
+# ══════════════════════════════════════════════════════════════
+# STAGE 5: Tiered Routing
+# ──────────────────────────────────────────────────────────────
+# Routes events to Hot/Warm/Cold ClickHouse tables based on
+# severity and rescue status:
+#   Hot  → ERROR, FATAL, CRITICAL, PANIC, or rescued events
+#   Warm → WARN
+#   Cold → Everything else (INFO/DEBUG that survived all filters)
+# ══════════════════════════════════════════════════════════════
+[transforms.route_by_tier]
+type = "route"
+inputs = ["multiline_reassembly"]
+
+[transforms.route_by_tier.route]
+hot = '''
+  bool!(.rescued) == true ||
+  includes(
+    ["error", "fatal", "critical", "panic"],
+    downcase(string!(.level ?? "info"))
+  )
+'''
+warm = '''
+  includes(["warn", "warning"], downcase(string!(.level ?? "info")))
+'''
+# _unmatched implicitly routes to cold tier
+
+# ══════════════════════════════════════════════════════════════
+# SINKS: ClickHouse Tiered Storage
+# ══════════════════════════════════════════════════════════════
+
+# ── Hot Tier: SSD, 7-day TTL, sub-100ms queries ─────────────
+[sinks.clickhouse_hot]
+type = "clickhouse"
+inputs = ["route_by_tier.hot"]
+endpoint = "http://clickhouse.observability.svc.cluster.local:8123"
+database = "telemetry"
+table = "logs_hot"
+skip_unknown_fields = true
+date_time_best_effort = true
+
+[sinks.clickhouse_hot.encoding]
+timestamp_format = "unix"
+
+[sinks.clickhouse_hot.buffer]
+type = "disk"
+max_size = 5368709120  # 5 GB per aggregator pod
+when_full = "block"
+
+[sinks.clickhouse_hot.batch]
+max_bytes = 10485760   # 10 MB batch inserts
+timeout_secs = 5
+
+# ── Warm Tier: SSD/HDD hybrid, 30-day TTL ───────────────────
+[sinks.clickhouse_warm]
+type = "clickhouse"
+inputs = ["route_by_tier.warm"]
+endpoint = "http://clickhouse.observability.svc.cluster.local:8123"
+database = "telemetry"
+table = "logs_warm"
+skip_unknown_fields = true
+date_time_best_effort = true
+
+[sinks.clickhouse_warm.encoding]
+timestamp_format = "unix"
+
+[sinks.clickhouse_warm.buffer]
+type = "disk"
+max_size = 3221225472  # 3 GB
+when_full = "block"
+
+[sinks.clickhouse_warm.batch]
+max_bytes = 10485760
+timeout_secs = 10
+
+# ── Cold Tier: S3 tiered storage, 90-day TTL ────────────────
+[sinks.clickhouse_cold]
+type = "clickhouse"
+inputs = ["route_by_tier._unmatched"]
+endpoint = "http://clickhouse.observability.svc.cluster.local:8123"
+database = "telemetry"
+table = "logs_cold"
+skip_unknown_fields = true
+date_time_best_effort = true
+
+[sinks.clickhouse_cold.encoding]
+timestamp_format = "unix"
+
+[sinks.clickhouse_cold.buffer]
+type = "disk"
+max_size = 2147483648  # 2 GB
+when_full = "block"
+
+[sinks.clickhouse_cold.batch]
+max_bytes = 10485760
+timeout_secs = 15

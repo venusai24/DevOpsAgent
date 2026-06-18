@@ -1,0 +1,43 @@
+[
+  {
+    "assignmentType": "System",
+    "definitionVersion": "1.*.*",
+    "displayName": "Allowed resource deployment regions",
+    "enforcementMode": "Default",
+    "id": "/subscriptions/ac79ca97-6ead-4a8b-b81c-51edbe656b80/providers/Microsoft.Authorization/policyAssignments/sys.regionrestriction",
+    "metadata": {
+      "createdBy": "d324a3bf-0bdd-4659-87a6-4aeb90bf81db",
+      "createdOn": "2026-04-24T06:45:18.2653522Z",
+      "updatedBy": null,
+      "updatedOn": null
+    },
+    "name": "sys.regionrestriction",
+    "nonComplianceMessages": [
+      {
+        "message": "This policy maintains a set of best available regions where your subscription can deploy resources. The objective of this policy is to ensure that your subscription has full access to Azure services with optimal performance. Should you need additional or different regions, contact support."
+      }
+    ],
+    "parameters": {
+      "listOfAllowedLocations": {
+        "value": [
+          "koreacentral",
+          "uaenorth",
+          "austriaeast",
+          "southeastasia",
+          "malaysiawest"
+        ]
+      }
+    },
+    "policyDefinitionId": "/providers/Microsoft.Authorization/policyDefinitions/b86dabb9-b578-4d7b-b842-3b45e95769a1",
+    "scope": "/subscriptions/ac79ca97-6ead-4a8b-b81c-51edbe656b80",
+    "systemData": {
+      "createdAt": "2026-04-24T06:45:18.2361455Z",
+      "createdBy": "5da7367f-09c8-493e-8fd4-638089cddec3",
+      "createdByType": "Application",
+      "lastModifiedAt": "2026-04-24T06:45:18.2361455Z",
+      "lastModifiedBy": "5da7367f-09c8-493e-8fd4-638089cddec3",
+      "lastModifiedByType": "Application"
+    },
+    "type": "Microsoft.Authorization/policyAssignments"
+  }
+]

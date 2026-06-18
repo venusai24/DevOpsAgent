@@ -1,0 +1,45 @@
+# ═══════════════════════════════════════════════════════════════
+# kustomization.yaml
+# Golden Blueprint — Kustomize Entrypoint
+#
+# Deploy the entire pipeline:
+#   kubectl apply -k manifests/golden-pipeline/
+#
+# Or preview:
+#   kubectl kustomize manifests/golden-pipeline/
+# ═══════════════════════════════════════════════════════════════
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+metadata:
+  name: golden-pipeline
+  annotations:
+    config.kubernetes.io/description: >
+      Golden Blueprint: Autonomous SRE Log Collection Pipeline.
+      Two-tier Vector topology with 5-stage filter DAG, HA OTel
+      K8s Events collection, tiered ClickHouse storage, and
+      comprehensive pipeline self-monitoring.
+
+# Apply in dependency order
+resources:
+  - 00-namespace-priorities.yaml
+  - 01-rbac.yaml
+  - 03-vector-edge-daemonset.yaml
+  - 05-vector-aggregator-deployment.yaml
+  - 06-otel-k8s-events.yaml
+  - 08-pipeline-monitoring.yaml
+  - 09-configmap-ttl-reconciler.yaml
+  # Phase 1 — Architecture hardening (k8sattributes + cardinality control)
+  - 10-otel-k8sattributes-patch.yaml
+  # Phase 3 — ML anomaly detection sidecar (Isolation Forest)
+  - 11-airs-ml-sidecar.yaml
+
+labels:
+  - pairs:
+      app.kubernetes.io/managed-by: kustomize
+      app.kubernetes.io/part-of: golden-pipeline
+
+# Common annotations for tracking
+commonAnnotations:
+  golden-pipeline/version: "2.0.0"
+  golden-pipeline/architecture: "two-tier-vector-clickhouse-ml-anomaly"

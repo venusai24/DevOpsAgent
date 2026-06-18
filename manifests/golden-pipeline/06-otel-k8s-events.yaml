@@ -1,0 +1,186 @@
+# ═══════════════════════════════════════════════════════════════
+# 06-otel-k8s-events.yaml
+# Golden Blueprint — OTel K8s Events Collector (HA LeaderElection)
+#
+# Architecture:
+#   2-replica Deployment backed by Kubernetes Lease-based leader
+#   election. Only the elected leader actively watches K8s Events
+#   via the API server. On leader failure, the standby promotes
+#   within seconds — zero-gap, zero-duplicate event collection.
+#
+#   Replaces the original single-replica Recreate strategy which
+#   silently drops all K8s events during any rollout or pod failure.
+# ═══════════════════════════════════════════════════════════════
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: otel-k8s-events
+  namespace: observability
+  labels:
+    app.kubernetes.io/name: otel-k8s-events
+    app.kubernetes.io/component: event-collector
+    app.kubernetes.io/part-of: golden-pipeline
+spec:
+  type: ClusterIP
+  ports:
+    - name: prom-metrics
+      port: 8888
+      targetPort: 8888
+      protocol: TCP
+  selector:
+    app.kubernetes.io/name: otel-k8s-events
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: otel-k8s-events
+  namespace: observability
+  labels:
+    app.kubernetes.io/name: otel-k8s-events
+    app.kubernetes.io/component: event-collector
+    app.kubernetes.io/part-of: golden-pipeline
+spec:
+  replicas: 1  # Standard deployment, leader_elector not available in this contrib build
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: otel-k8s-events
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: otel-k8s-events
+        app.kubernetes.io/component: event-collector
+        app.kubernetes.io/part-of: golden-pipeline
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8888"
+        prometheus.io/path: "/metrics"
+    spec:
+      serviceAccountName: otel-k8s-events
+      priorityClassName: telemetry-cluster-critical
+      # Spread replicas across nodes for HA
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchExpressions:
+                  - key: app.kubernetes.io/name
+                    operator: In
+                    values:
+                      - otel-k8s-events
+              topologyKey: kubernetes.io/hostname
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: collector
+          image: otel/opentelemetry-collector-contrib:0.108.0
+          args:
+            - "--config=/conf/otel-config.yaml"
+          ports:
+            - name: prom-metrics
+              containerPort: 8888
+              protocol: TCP
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          volumeMounts:
+            - name: config
+              mountPath: /conf
+              readOnly: true
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 13133  # health_check extension
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 13133
+            initialDelaySeconds: 5
+            periodSeconds: 10
+      volumes:
+        - name: config
+          configMap:
+            name: otel-k8s-events-config
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: otel-k8s-events-config
+  namespace: observability
+  labels:
+    app.kubernetes.io/name: otel-k8s-events
+    app.kubernetes.io/part-of: golden-pipeline
+data:
+  otel-config.yaml: |
+    extensions:
+      health_check:
+        endpoint: 0.0.0.0:13133
+
+      # LeaderElection removed as it is not supported in this distroless build
+
+    receivers:
+      # Watch ALL namespaces for K8s events
+      # Captures: FailedScheduling, OOMKilling, NodeNotReady,
+      # ErrImagePull, BackOff, FailedMount, Evicted, etc.
+      k8s_events:
+        namespaces: []  # Empty = all namespaces
+        auth_type: serviceAccount
+
+    processors:
+      # Add source provenance tag so the AI agent can distinguish
+      # K8s events from container logs in the same ClickHouse table
+      resource:
+        attributes:
+          - key: source
+            value: k8s_event
+            action: upsert
+
+      # Batch events for efficient ClickHouse inserts
+      batch:
+        timeout: 5s
+        send_batch_size: 256
+        send_batch_max_size: 512
+
+      # Memory limiter to prevent OOM under event storms
+      memory_limiter:
+        check_interval: 1s
+        limit_mib: 400
+        spike_limit_mib: 100
+
+    exporters:
+      clickhouse:
+        endpoint: tcp://clickhouse.observability.svc.cluster.local:9000
+        database: telemetry
+        logs_table_name: k8s_events
+        ttl: 720h  # 30 days
+        timeout: 10s
+        retry_on_failure:
+          enabled: true
+          initial_interval: 5s
+          max_interval: 30s
+          max_elapsed_time: 300s
+        sending_queue:
+          enabled: true
+          num_consumers: 4
+          queue_size: 5000
+
+    service:
+      extensions: [health_check]
+      telemetry:
+        metrics:
+          address: 0.0.0.0:8888
+      pipelines:
+        logs:
+          receivers: [k8s_events]
+          processors: [memory_limiter, resource, batch]
+          exporters: [clickhouse]

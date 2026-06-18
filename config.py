@@ -92,4 +92,19 @@ class Settings(BaseSettings):
     # ── Phase 5: Corpus ───────────────────────────────────────────────────────
     CORPUS_DIR: str = "Corpus"            # Root of the static document corpus
 
+    # ── Golden Blueprint: ClickHouse Log Backend ──────────────────────────────
+    # When the Golden Blueprint pipeline is deployed, set these to point at the
+    # ClickHouse cluster. When unset, the system falls back to K8s API polling.
+    CLICKHOUSE_HOST: str = "clickhouse.observability.svc.cluster.local"
+    CLICKHOUSE_PORT: int = 9000
+    CLICKHOUSE_DB: str = "telemetry"
+    CLICKHOUSE_USER: str = "airs_agent"
+    CLICKHOUSE_PASSWORD: str = ""
+    # Lookback window (minutes) for forensic log queries.
+    # Increase for long-running incidents where the anomaly may have started
+    # well before the Prometheus alert fired.
+    CLICKHOUSE_LOOKBACK_MINUTES: int = 60
+    # Maximum rows returned per pod per forensic query (across all tiers).
+    CLICKHOUSE_MAX_ROWS: int = 200
+
 settings = Settings()

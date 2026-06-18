@@ -1,0 +1,105 @@
+# ═══════════════════════════════════════════════════════════════
+# 09-configmap-ttl-reconciler.yaml
+# Golden Blueprint — Dynamic Verbosity Override TTL Reconciler
+#
+# Addresses Blindspot 4: If the AI agent enables DEBUG-level
+# passthrough for a specific pod and then crashes, the bypass
+# rule persists indefinitely, flooding ClickHouse.
+#
+# This CronJob runs every 60 seconds and reverts any Vector
+# ConfigMap overrides that have expired their TTL annotation.
+# ═══════════════════════════════════════════════════════════════
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ttl-reconciler-script
+  namespace: observability
+  labels:
+    app.kubernetes.io/name: ttl-reconciler
+    app.kubernetes.io/part-of: golden-pipeline
+data:
+  reconcile.sh: |
+    #!/bin/bash
+    set -euo pipefail
+
+    # Check if Vector Aggregator ConfigMap has an AIRS bypass override
+    CONFIGMAP="vector-aggregator-config"
+    NAMESPACE="observability"
+
+    # Read the TTL annotation
+    TTL=$(kubectl get configmap "$CONFIGMAP" -n "$NAMESPACE" \
+          -o jsonpath='{.metadata.annotations.airs\.io/bypass-expires}' 2>/dev/null || echo "")
+
+    if [ -z "$TTL" ]; then
+      # No active bypass override — nothing to do
+      exit 0
+    fi
+
+    # Compare expiry timestamp with current time
+    EXPIRY_EPOCH=$(date -d "$TTL" +%s 2>/dev/null || echo "0")
+    NOW_EPOCH=$(date +%s)
+
+    if [ "$NOW_EPOCH" -ge "$EXPIRY_EPOCH" ]; then
+      echo "$(date -u +%FT%TZ) - TTL expired for AIRS bypass override. Reverting ConfigMap..."
+
+      # Remove the bypass override annotations
+      kubectl annotate configmap "$CONFIGMAP" -n "$NAMESPACE" \
+        "airs.io/bypass-namespace-" \
+        "airs.io/bypass-pod-" \
+        "airs.io/bypass-expires-" \
+        "airs.io/bypass-reason-" \
+        --overwrite
+
+      # Trigger a Vector config reload by touching the annotation
+      kubectl annotate configmap "$CONFIGMAP" -n "$NAMESPACE" \
+        "airs.io/last-reconciled=$(date -u +%FT%TZ)" \
+        --overwrite
+
+      echo "$(date -u +%FT%TZ) - Bypass override reverted successfully."
+    else
+      REMAINING=$(( EXPIRY_EPOCH - NOW_EPOCH ))
+      echo "$(date -u +%FT%TZ) - Bypass override active. Expires in ${REMAINING}s."
+    fi
+
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: ttl-reconciler
+  namespace: observability
+  labels:
+    app.kubernetes.io/name: ttl-reconciler
+    app.kubernetes.io/part-of: golden-pipeline
+spec:
+  schedule: "* * * * *"  # Every minute
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      activeDeadlineSeconds: 30
+      template:
+        spec:
+          serviceAccountName: airs-agent  # Reuses the ConfigMap patcher role
+          restartPolicy: OnFailure
+          containers:
+            - name: reconciler
+              image: bitnami/kubectl:1.30
+              command: ["/bin/bash", "/scripts/reconcile.sh"]
+              resources:
+                requests:
+                  cpu: 10m
+                  memory: 32Mi
+                limits:
+                  cpu: 50m
+                  memory: 64Mi
+              volumeMounts:
+                - name: script
+                  mountPath: /scripts
+                  readOnly: true
+          volumes:
+            - name: script
+              configMap:
+                name: ttl-reconciler-script
+                defaultMode: 0755

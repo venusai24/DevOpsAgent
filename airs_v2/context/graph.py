@@ -82,8 +82,14 @@ _FIXTURES_PATH = (
     / "topology_fixtures.json"
 )
 
-# Blast radius depth — hardcoded per Stage 2 design decision
+# Blast radius depth — default per Stage 2 design decision (ADR-02)
 BLAST_RADIUS_DEPTH = 2
+
+# Maximum node count for adaptive depth escalation (hard cap).
+# When depth-3 expansion would produce > this many nodes, the expansion
+# is suppressed and depth-2 is returned. Prevents context window explosion
+# regardless of graph size. Must stay << LLM context token budget.
+_MAX_ADAPTIVE_NODES = 30
 
 
 # ---------------------------------------------------------------------------
@@ -262,8 +268,23 @@ class ContextGraph:
             self.load_from_fixtures(self._path)
 
     # ------------------------------------------------------------------
-    # Graph loading
+    # Graph loading and Snapshots
     # ------------------------------------------------------------------
+
+    def export_snapshot(self) -> dict:
+        """Export the current graph topology to a JSON-serializable dict."""
+        from networkx.readwrite import json_graph
+        return json_graph.node_link_data(self._g)
+
+    def import_snapshot(self, snapshot_data: dict) -> None:
+        """Import a previously exported graph topology."""
+        from networkx.readwrite import json_graph
+        self._g = json_graph.node_link_graph(snapshot_data)
+        self._loaded = True
+        logger.info(
+            "[ContextGraph] Imported snapshot with %d nodes and %d edges.",
+            self._g.number_of_nodes(), self._g.number_of_edges()
+        )
 
     def load_from_fixtures(self, path: Path) -> None:
         """Seed the graph from a topology JSON fixture file."""
@@ -575,19 +596,20 @@ class ContextGraph:
         visited.discard(start)   # The focal service itself is excluded from the set
         return visited
 
-    def blast_radius(self, service: str) -> BlastRadiusResult:
+    def _compute_blast_radius_at_depth(
+        self,
+        service: str,
+        depth: int,
+    ) -> BlastRadiusResult:
         """
-        Compute the blast radius of *service* at the fixed depth of 2.
-
-        The blast radius is the union of:
-        - Downstream cone: nodes this service depends on (may cascade up)
-        - Upstream cone: nodes that depend on this service (directly impacted)
+        Internal helper: compute blast radius at a specific depth.
+        Used by the public ``blast_radius()`` method for adaptive escalation.
         """
         if not self._g.has_node(service):
-            return BlastRadiusResult(focus_service=service)
+            return BlastRadiusResult(focus_service=service, depth=depth)
 
-        downstream = self._bfs_bounded(service, "successors", BLAST_RADIUS_DEPTH)
-        upstream = self._bfs_bounded(service, "predecessors", BLAST_RADIUS_DEPTH)
+        downstream = self._bfs_bounded(service, "successors", depth)
+        upstream = self._bfs_bounded(service, "predecessors", depth)
         affected = downstream | upstream
 
         tier1 = [
@@ -601,7 +623,7 @@ class ContextGraph:
             if self._g.has_node(t1):
                 try:
                     for path in nx.all_simple_paths(
-                        self._g.reverse(), service, t1, cutoff=BLAST_RADIUS_DEPTH
+                        self._g.reverse(), service, t1, cutoff=depth
                     ):
                         paths.append(list(reversed(path)))
                 except nx.NetworkXError:
@@ -620,7 +642,7 @@ class ContextGraph:
 
         return BlastRadiusResult(
             focus_service=service,
-            depth=BLAST_RADIUS_DEPTH,
+            depth=depth,
             affected_services=sorted(affected),
             tier1_services=sorted(tier1),
             tier1_impact=bool(tier1),
@@ -628,6 +650,68 @@ class ContextGraph:
             propagation_paths=paths,
             on_call_contacts=sorted(contacts),
         )
+
+    def blast_radius(
+        self,
+        service: str,
+        allow_escalation: bool = True,
+    ) -> BlastRadiusResult:
+        """
+        Compute the blast radius of *service* at depth-2 (ADR-02 default).
+
+        Adaptive depth escalation (depth-3)
+        ------------------------------------
+        The blast radius conditionally escalates to depth-3 when ALL of the
+        following conditions are true:
+
+          1. ``allow_escalation=True`` (default)
+          2. All depth-2 affected nodes show ``health_status='healthy'``
+             (symptom is upstream, root cause is beyond the current window)
+          3. A depth-3 expansion would produce <= ``_MAX_ADAPTIVE_NODES`` nodes
+             (hard context cap — preserves LLM context window budget)
+
+        This implements the "Adaptive Bounded Depth" recommendation from
+        the implementation plan, Section 3.4. The hard cap ensures we never
+        violate the spirit of ADR-02 ("bounded context prevents hallucination");
+        we just allow the boundary to shift one hop when the evidence demands it.
+
+        The blast radius is the union of:
+        - Downstream cone: nodes this service depends on (may cascade up)
+        - Upstream cone: nodes that depend on this service (directly impacted)
+        """
+        # ── Base: depth-2 computation ────────────────────────────────────
+        result = self._compute_blast_radius_at_depth(service, depth=2)
+
+        if not allow_escalation:
+            return result
+
+        # ── Adaptive escalation gate ─────────────────────────────────────
+        # Escalate to depth-3 only when ALL depth-2 nodes are healthy,
+        # which signals the root cause is upstream of the current window.
+        if result.affected_services:
+            all_healthy = all(
+                self._g.nodes[n].get("health_status", "unknown") == "healthy"
+                for n in result.affected_services
+                if self._g.has_node(n)
+            )
+            if all_healthy:
+                expanded = self._compute_blast_radius_at_depth(service, depth=3)
+                # Hard cap: only escalate if expansion stays within the node budget
+                if len(expanded.affected_services) <= _MAX_ADAPTIVE_NODES:
+                    logger.debug(
+                        "[ContextGraph] Adaptive depth escalation: %s depth-2→3 "
+                        "(all depth-2 healthy, %d nodes ≤ cap %d)",
+                        service, len(expanded.affected_services), _MAX_ADAPTIVE_NODES,
+                    )
+                    return expanded
+                else:
+                    logger.debug(
+                        "[ContextGraph] Depth-3 expansion suppressed for %s "
+                        "(%d nodes > cap %d) — returning depth-2",
+                        service, len(expanded.affected_services), _MAX_ADAPTIVE_NODES,
+                    )
+
+        return result
 
     def subgraph(self, service: str) -> ContextSubgraph:
         """

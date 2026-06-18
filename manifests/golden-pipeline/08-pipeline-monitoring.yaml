@@ -1,0 +1,250 @@
+# ═══════════════════════════════════════════════════════════════
+# 08-pipeline-monitoring.yaml
+# Golden Blueprint — Pipeline Self-Monitoring
+#
+# Addresses Blindspot 3: "No Observability of the Observability
+# Pipeline Itself". Creates PrometheusRules and ServiceMonitors
+# that feed Vector/OTel pipeline health metrics into the same
+# PrometheusAnomalyEngine used by the AI agent, giving it
+# meta-awareness of pipeline degradation.
+# ═══════════════════════════════════════════════════════════════
+
+# ── ServiceMonitor: Vector Edge DaemonSet ────────────────────
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: vector-edge
+  namespace: observability
+  labels:
+    app.kubernetes.io/name: vector-edge
+    app.kubernetes.io/part-of: golden-pipeline
+    # Ensures Prometheus Operator discovers this ServiceMonitor
+    release: prometheus
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: vector-edge
+  namespaceSelector:
+    matchNames:
+      - observability
+  endpoints:
+    - port: prom-metrics
+      interval: 30s
+      path: /metrics
+
+---
+# ── ServiceMonitor: Vector Aggregator ────────────────────────
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: vector-aggregator
+  namespace: observability
+  labels:
+    app.kubernetes.io/name: vector-aggregator
+    app.kubernetes.io/part-of: golden-pipeline
+    release: prometheus
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: vector-aggregator
+  namespaceSelector:
+    matchNames:
+      - observability
+  endpoints:
+    - port: prom-metrics
+      interval: 30s
+      path: /metrics
+
+---
+# ── ServiceMonitor: OTel K8s Events ─────────────────────────
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: otel-k8s-events
+  namespace: observability
+  labels:
+    app.kubernetes.io/name: otel-k8s-events
+    app.kubernetes.io/part-of: golden-pipeline
+    release: prometheus
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: otel-k8s-events
+  namespaceSelector:
+    matchNames:
+      - observability
+  endpoints:
+    - port: prom-metrics
+      interval: 30s
+      path: /metrics
+
+---
+# ═══════════════════════════════════════════════════════════════
+# PrometheusRule: Pipeline Health Alerts
+# ══════════════════════════════════════════════════════════════
+# These alerts are consumed by the same PrometheusAnomalyEngine
+# in prometheus_anomaly.py, giving the AI agent META-AWARENESS
+# of the pipeline's health. When these fire, the agent knows its
+# log data may be incomplete and adjusts confidence accordingly.
+# ═══════════════════════════════════════════════════════════════
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: golden-pipeline-alerts
+  namespace: observability
+  labels:
+    app.kubernetes.io/part-of: golden-pipeline
+    release: prometheus
+spec:
+  groups:
+    - name: golden-pipeline.edge
+      rules:
+        # ── Edge Agent: Dropping Events ──────────────────────
+        # Fires when any edge DaemonSet is dropping events due to
+        # buffer overflow (downstream aggregator unreachable)
+        - alert: VectorEdgeEventsDropped
+          expr: |
+            rate(vector_buffer_discarded_events_total{component_kind="sink"}[5m]) > 0
+          for: 2m
+          labels:
+            severity: warning
+            component: vector-edge
+            pipeline: golden-pipeline
+          annotations:
+            summary: "Vector Edge is dropping log events"
+            description: >
+              Vector Edge DaemonSet on {{ $labels.pod }} is dropping
+              {{ $value | humanize }} events/sec. The Aggregator tier
+              may be unreachable or saturated. The AI agent's log data
+              is INCOMPLETE during this window.
+            runbook_url: "https://vector.dev/docs/administration/troubleshooting/"
+
+        # ── Edge Agent: High Memory ──────────────────────────
+        - alert: VectorEdgeHighMemory
+          expr: |
+            container_memory_working_set_bytes{container="vector", pod=~"vector-edge.*"}
+            / container_spec_memory_limit_bytes{container="vector", pod=~"vector-edge.*"}
+            > 0.85
+          for: 5m
+          labels:
+            severity: warning
+            component: vector-edge
+            pipeline: golden-pipeline
+          annotations:
+            summary: "Vector Edge approaching memory limit"
+            description: >
+              Vector Edge on {{ $labels.pod }} is using
+              {{ $value | humanizePercentage }} of its memory limit.
+              OOM kill imminent — may lose log collection on this node.
+
+    - name: golden-pipeline.aggregator
+      rules:
+        # ── Aggregator: Sink Output Stalled ──────────────────
+        # Fires when an aggregator pod stops sending events to
+        # ClickHouse (ClickHouse down, network partition, etc.)
+        - alert: VectorAggregatorSinkStalled
+          expr: |
+            rate(vector_component_sent_events_total{component_type="clickhouse"}[5m]) == 0
+            and
+            rate(vector_component_received_events_total{component_type="vector", component_kind="source"}[5m]) > 0
+          for: 5m
+          labels:
+            severity: critical
+            component: vector-aggregator
+            pipeline: golden-pipeline
+          annotations:
+            summary: "Vector Aggregator ClickHouse sink is stalled"
+            description: >
+              Aggregator {{ $labels.pod }} is receiving events but
+              sending ZERO events to ClickHouse for 5+ minutes.
+              Disk buffer is filling — pipeline will stall completely
+              when buffer is exhausted. The AI agent CANNOT query
+              recent logs.
+
+        # ── Aggregator: Disk Buffer Filling ──────────────────
+        - alert: VectorAggregatorDiskBufferHigh
+          expr: |
+            vector_buffer_byte_size{buffer_type="disk"}
+            / (5368709120)  # 5GB max buffer size
+            > 0.80
+          for: 5m
+          labels:
+            severity: critical
+            component: vector-aggregator
+            pipeline: golden-pipeline
+          annotations:
+            summary: "Vector Aggregator disk buffer >80% full"
+            description: >
+              Aggregator {{ $labels.pod }} disk buffer is
+              {{ $value | humanizePercentage }} full. ClickHouse is
+              degraded. When buffer reaches 100%, backpressure will
+              cascade to edge DaemonSets, which will start DROPPING
+              events.
+
+        # ── Aggregator: High Error Rate ──────────────────────
+        - alert: VectorAggregatorErrorsHigh
+          expr: |
+            rate(vector_component_errors_total[5m]) > 0.1
+          for: 5m
+          labels:
+            severity: warning
+            component: vector-aggregator
+            pipeline: golden-pipeline
+          annotations:
+            summary: "Vector Aggregator experiencing errors"
+            description: >
+              Aggregator {{ $labels.pod }} is generating
+              {{ $value | humanize }} errors/sec in component
+              {{ $labels.component_id }}.
+
+    - name: golden-pipeline.otel
+      rules:
+        # ── OTel: K8s Events Receiver Stopped ────────────────
+        - alert: OTelK8sEventsReceiverStopped
+          expr: |
+            rate(otelcol_receiver_accepted_log_records_total{receiver="k8s_events"}[10m]) == 0
+          for: 10m
+          labels:
+            severity: warning
+            component: otel-k8s-events
+            pipeline: golden-pipeline
+          annotations:
+            summary: "OTel K8s Events receiver is not collecting events"
+            description: >
+              No Kubernetes events have been received for 10+ minutes.
+              This may indicate a leader election failure or API server
+              connectivity issue. K8s event context will be MISSING
+              from the AI agent's diagnostic data.
+
+        # ── OTel: Export Failures ────────────────────────────
+        - alert: OTelK8sEventsExportFailure
+          expr: |
+            rate(otelcol_exporter_send_failed_log_records_total{exporter="clickhouse"}[5m]) > 0
+          for: 5m
+          labels:
+            severity: warning
+            component: otel-k8s-events
+            pipeline: golden-pipeline
+          annotations:
+            summary: "OTel K8s Events failing to export to ClickHouse"
+            description: >
+              {{ $value | humanize }} log records/sec are failing to
+              export to ClickHouse. K8s events may be lost.
+
+    - name: golden-pipeline.clickhouse
+      rules:
+        # ── ClickHouse: Insert Failures ──────────────────────
+        - alert: ClickHouseInsertFailures
+          expr: |
+            increase(ClickHouseErrorMetric_CANNOT_INSERT_INTO_TABLE[5m]) > 0
+          for: 5m
+          labels:
+            severity: critical
+            component: clickhouse
+            pipeline: golden-pipeline
+          annotations:
+            summary: "ClickHouse rejecting log inserts"
+            description: >
+              ClickHouse is failing to insert log records. This will
+              cause Vector disk buffers to fill and eventually cascade
+              to event dropping at the edge tier.

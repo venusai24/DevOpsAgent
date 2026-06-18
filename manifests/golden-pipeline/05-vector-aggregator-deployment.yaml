@@ -1,0 +1,332 @@
+# ═══════════════════════════════════════════════════════════════
+# 05-vector-aggregator-deployment.yaml
+# Golden Blueprint — Vector Aggregator Tier
+# ═══════════════════════════════════════════════════════════════
+apiVersion: v1
+kind: Service
+metadata:
+  name: vector-aggregator
+  namespace: observability
+  labels:
+    app.kubernetes.io/name: vector-aggregator
+    app.kubernetes.io/component: aggregator
+    app.kubernetes.io/part-of: golden-pipeline
+spec:
+  type: ClusterIP
+  ports:
+    - name: vector-input
+      port: 6000
+      targetPort: 6000
+      protocol: TCP
+    - name: prom-metrics
+      port: 9598
+      targetPort: 9598
+      protocol: TCP
+    - name: api
+      port: 8686
+      targetPort: 8686
+      protocol: TCP
+  selector:
+    app.kubernetes.io/name: vector-aggregator
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: vector-aggregator
+  namespace: observability
+  labels:
+    app.kubernetes.io/name: vector-aggregator
+    app.kubernetes.io/component: aggregator
+    app.kubernetes.io/part-of: golden-pipeline
+spec:
+  serviceName: vector-aggregator
+  replicas: 1
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: vector-aggregator
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: vector-aggregator
+        app.kubernetes.io/component: aggregator
+        app.kubernetes.io/part-of: golden-pipeline
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9598"
+        prometheus.io/path: "/metrics"
+    spec:
+      serviceAccountName: vector-aggregator
+      priorityClassName: telemetry-cluster-critical
+      terminationGracePeriodSeconds: 60
+      # Anti-affinity: spread aggregator pods across nodes
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchExpressions:
+                    - key: app.kubernetes.io/name
+                      operator: In
+                      values:
+                        - vector-aggregator
+                topologyKey: kubernetes.io/hostname
+      containers:
+        - name: vector
+          image: timberio/vector:0.43.1-distroless-libc
+          args:
+            - "--config-dir"
+            - "/etc/vector/"
+            - "--watch-config"
+          ports:
+            - name: vector-input
+              containerPort: 6000
+              protocol: TCP
+            - name: prom-metrics
+              containerPort: 9598
+              protocol: TCP
+            - name: api
+              containerPort: 8686
+              protocol: TCP
+          env:
+            - name: VECTOR_SELF_NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          resources:
+            requests:
+              cpu: "250m"
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          volumeMounts:
+            - name: config
+              mountPath: /etc/vector/
+              readOnly: true
+            - name: data-dir
+              mountPath: /vector-data-dir
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8686
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            failureThreshold: 5
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8686
+            initialDelaySeconds: 10
+            periodSeconds: 10
+      volumes:
+        - name: config
+          configMap:
+            name: vector-aggregator-config
+  # ── Persistent Volumes for Disk Buffering ──────────────────
+  # Each aggregator pod gets its own PVC for disk-based buffering.
+  # When ClickHouse is degraded, pending telemetry is persisted
+  # here rather than held in memory (preventing OOM kills).
+  volumeClaimTemplates:
+    - metadata:
+        name: data-dir
+        labels:
+          app.kubernetes.io/name: vector-aggregator
+          app.kubernetes.io/part-of: golden-pipeline
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 20Gi
+        # Uncomment and set to your StorageClass for production
+        # storageClassName: managed-premium
+
+---
+# ── ConfigMap wrapping the TOML config ──────────────────────
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vector-aggregator-config
+  namespace: observability
+  labels:
+    app.kubernetes.io/name: vector-aggregator
+    app.kubernetes.io/part-of: golden-pipeline
+  annotations:
+    airs.io/managed: "true"
+data:
+  vector.toml: |
+    data_dir = "/vector-data-dir"
+
+    [api]
+    enabled = true
+    address = "0.0.0.0:8686"
+
+    [sources.edge_input]
+    type = "vector"
+    address = "0.0.0.0:6000"
+
+    [transforms.semantic_rescue]
+    type = "remap"
+    inputs = ["edge_input"]
+    source = '''
+      CRITICAL_PATTERNS = r'(?i)(error|fail|timeout|refused|oom|panic|exception|segfault|deadlock|sigkill|sigterm|circuit.?breaker|backoff|back-off|throttl|crash|abort|fatal|unreachable|connection.reset|broken.pipe|no.space|disk.full|read.only.file.system|exit.code.[1-9]|stack.?trace|null.?pointer|class.?not.?found|out.of.memory|cannot.allocate|kill|evict|unresponsive|degraded|unavailable)'
+      if match(string!(.message), CRITICAL_PATTERNS) {
+        .rescued = true
+        .rescue_reason = "critical_keyword_match"
+      } else {
+        .rescued = false
+        .rescue_reason = ""
+      }
+    '''
+
+    [transforms.classify_source]
+    type = "remap"
+    inputs = ["semantic_rescue"]
+    source = '''
+      INFRA_NAMESPACES = ["kube-system", "kube-public", "kube-node-lease", "ingress-nginx", "cert-manager", "monitoring", "istio-system", "calico-system", "tigera-operator", "gatekeeper-system", "observability", "logging", "linkerd"]
+      ns = string!(.kubernetes.pod_namespace)
+      .source_class = if includes(INFRA_NAMESPACES, ns) { "infrastructure" } else { "application" }
+    '''
+
+    [transforms.drop_infra_noise]
+    type = "filter"
+    inputs = ["classify_source"]
+    condition = '''
+      bool!(.rescued) == true || .source_class != "infrastructure" || includes(["error", "warn", "fatal", "critical", "panic"], downcase(string(.level) ?? "info"))
+    '''
+
+    [transforms.drop_probe_noise]
+    type = "filter"
+    inputs = ["drop_infra_noise"]
+    condition = '''
+      bool!(.rescued) == true || !(match(string!(.message), r'"?(GET|HEAD|POST)\s+/(healthz?|readyz?|livez?|metrics|status|ping)[\s?"]') && match(string!(.message), r'\b(200|204)\b'))
+    '''
+
+    [transforms.multiline_reassembly]
+    type = "reduce"
+    inputs = ["drop_probe_noise"]
+    group_by = ["kubernetes.pod_namespace", "kubernetes.pod_name", "kubernetes.container_name"]
+    merge_strategies.message = "concat_newline"
+    starts_when = '''
+      match(string!(.message), r'^(\d{4}[-/]\d{2}[-/]\d{2}|[A-Z][a-z]{2}\s+\d|[A-Z]{2,5}\s+[\[|(]|\{"|Traceback|Exception in|goroutine\s+\d|panic:)')
+    '''
+    expire_after_ms = 3000
+
+    [transforms.route_by_tier]
+    type = "route"
+    inputs = ["multiline_reassembly"]
+
+    [transforms.route_by_tier.route]
+    hot = 'bool!(.rescued) == true || includes(["error", "fatal", "critical", "panic"], downcase(string(.level) ?? "info"))'
+    warm = 'includes(["warn", "warning"], downcase(string(.level) ?? "info"))'
+
+    [sinks.clickhouse_hot]
+    type = "clickhouse"
+    inputs = ["route_by_tier.hot"]
+    endpoint = "http://clickhouse.observability.svc.cluster.local:8123"
+    database = "telemetry"
+    table = "logs_hot"
+    skip_unknown_fields = true
+    date_time_best_effort = true
+
+    [sinks.clickhouse_hot.encoding]
+    timestamp_format = "unix"
+
+    [sinks.clickhouse_hot.buffer]
+    type = "disk"
+    max_size = 5368709120
+    when_full = "block"
+
+    [sinks.clickhouse_hot.batch]
+    max_bytes = 10485760
+    timeout_secs = 5
+
+    [sinks.clickhouse_warm]
+    type = "clickhouse"
+    inputs = ["route_by_tier.warm"]
+    endpoint = "http://clickhouse.observability.svc.cluster.local:8123"
+    database = "telemetry"
+    table = "logs_warm"
+    skip_unknown_fields = true
+    date_time_best_effort = true
+
+    [sinks.clickhouse_warm.encoding]
+    timestamp_format = "unix"
+
+    [sinks.clickhouse_warm.buffer]
+    type = "disk"
+    max_size = 3221225472
+    when_full = "block"
+
+    [sinks.clickhouse_warm.batch]
+    max_bytes = 10485760
+    timeout_secs = 10
+
+    [sinks.clickhouse_cold]
+    type = "clickhouse"
+    inputs = ["route_by_tier._unmatched"]
+    endpoint = "http://clickhouse.observability.svc.cluster.local:8123"
+    database = "telemetry"
+    table = "logs_cold"
+    skip_unknown_fields = true
+    date_time_best_effort = true
+
+    [sinks.clickhouse_cold.encoding]
+    timestamp_format = "unix"
+
+    [sinks.clickhouse_cold.buffer]
+    type = "disk"
+    max_size = 2147483648
+    when_full = "block"
+
+    [sinks.clickhouse_cold.batch]
+    max_bytes = 10485760
+    timeout_secs = 15
+
+---
+# ── Horizontal Pod Autoscaler ────────────────────────────────
+# Scales aggregator pods based on CPU usage. Under a thundering
+# herd (hundreds of pods crashing simultaneously), the multiline
+# reduce transform saturates CPU — HPA responds by adding pods.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: vector-aggregator
+  namespace: observability
+  labels:
+    app.kubernetes.io/name: vector-aggregator
+    app.kubernetes.io/part-of: golden-pipeline
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: StatefulSet
+    name: vector-aggregator
+  minReplicas: 1
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 60
+      policies:
+        - type: Pods
+          value: 2
+          periodSeconds: 60
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 120

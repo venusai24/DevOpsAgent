@@ -32,3 +32,14 @@ chromadb>=0.5.0
 sentence-transformers>=2.7.0
 # Phase 5: Production Slack Gateway (uncomment when deployed)
 # slack_sdk>=3.27.0
+# Phase 6: Prometheus Telemetry-Driven Anomaly Detection
+prometheus-api-client>=0.5.0
+# Golden Blueprint: ClickHouse Log Backend
+# Official ClickHouse client with native asyncio support (via aiohttp).
+# Replaces clickhouse-driver (sync TCP) to avoid sync-over-async
+# thread-pool exhaustion under concurrent forensic queries.
+# The [async] extra installs aiohttp and enables AsyncClient.
+clickhouse-connect[async]>=0.7.0
+# ML Sidecar: Isolation Forest anomaly scoring
+# scikit-learn already present above — no duplicate needed
+# FastAPI + uvicorn already present — no duplicate needed

@@ -1,0 +1,44 @@
+[
+    {
+        "fault_id": "valkey_memory_disruption",
+        "category": "Database Failure",
+        "description": "The valkey store is in OOM state",
+        "expected_root_cause": "The Valkey cache instance has run out of memory (OOM), exhausting cache resources and degrading read performance.",
+        "expected_mitigation": "Execute Cache Purge and Reset Runbook or scale up replica capacity."
+    },
+    {
+        "fault_id": "node_conntrack_exhaustion_hotel_reservation",
+        "category": "Network Failure",
+        "description": "Connection-heavy client pods pinned to one worker node fill Linux nf_conntrack state, causing fresh Hotel Reservation service requests from that node to time out while pods and services mostly remain healthy.",
+        "expected_root_cause": "The Linux nf_conntrack table limit is exhausted on the node, preventing new network connections and causing timeout cascades.",
+        "expected_mitigation": "Execute Connection Termination Runbook or drain traffic to redistribute the load."
+    },
+    {
+        "fault_id": "kafka_queue_problems",
+        "category": "System/Application Software Failure",
+        "description": "Overloads Kafka queue while simultaneously introducing a consumer side delay leading to a lag spike",
+        "expected_root_cause": "Message broker backlog triggered by consumer processing delay and an overloaded queue, leading to high message latency.",
+        "expected_mitigation": "Scale consumer replicas and shed load from producers."
+    },
+    {
+        "fault_id": "loadgenerator_flood_homepage",
+        "category": "System/Application Software Failure",
+        "description": "Flood the frontend with a large amount of requests",
+        "expected_root_cause": "Massive incoming traffic spike overwhelms the frontend application layer, causing latency and timeouts.",
+        "expected_mitigation": "Implement Load Shedding and Traffic Rate Limits to protect backend services."
+    },
+    {
+        "fault_id": "ingress_misroute",
+        "category": "Network Failure",
+        "description": "By modifying Kubernetes Ingress rules to route traffic from specific paths to incorrect backend services, simulates request misrouting issues caused by network routing configuration errors or load balancing misconfigurations.",
+        "expected_root_cause": "Ingress configuration misroutes traffic to the wrong backends, acting like a load balancer misconfiguration.",
+        "expected_mitigation": "Rollback Ingress configuration or initiate Traffic Failover to alternative ingress paths."
+    },
+    {
+        "fault_id": "load_spike_rpc_retry_storm",
+        "category": "Metastable Failure",
+        "description": "RPC module is misconfigured, then a load spike will trigger a retry storm",
+        "expected_root_cause": "A massive surge in traffic causes RPC timeouts which amplifies load via aggressive retries, resulting in a retry storm.",
+        "expected_mitigation": "Implement Rate Limiting and Load Shedding."
+    }
+]

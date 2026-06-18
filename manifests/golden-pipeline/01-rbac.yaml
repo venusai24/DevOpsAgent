@@ -1,0 +1,153 @@
+# ═══════════════════════════════════════════════════════════════
+# 01-rbac.yaml
+# Golden Blueprint — RBAC for Vector & OTel Collector
+# ═══════════════════════════════════════════════════════════════
+
+# ── Vector Edge DaemonSet RBAC ────────────────────────────────
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: vector-edge
+  namespace: observability
+  labels:
+    app.kubernetes.io/name: vector-edge
+    app.kubernetes.io/component: edge-agent
+    app.kubernetes.io/part-of: golden-pipeline
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: vector-edge
+  labels:
+    app.kubernetes.io/name: vector-edge
+    app.kubernetes.io/part-of: golden-pipeline
+rules:
+  # Vector kubernetes_logs source needs to list/watch pods for
+  # auto-discovery of log files and metadata enrichment
+  - apiGroups: [""]
+    resources: ["pods", "namespaces", "nodes"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: vector-edge
+  labels:
+    app.kubernetes.io/name: vector-edge
+    app.kubernetes.io/part-of: golden-pipeline
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: vector-edge
+subjects:
+  - kind: ServiceAccount
+    name: vector-edge
+    namespace: observability
+
+---
+# ── Vector Aggregator RBAC ────────────────────────────────────
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: vector-aggregator
+  namespace: observability
+  labels:
+    app.kubernetes.io/name: vector-aggregator
+    app.kubernetes.io/component: aggregator
+    app.kubernetes.io/part-of: golden-pipeline
+
+---
+# ── OTel K8s Events Collector RBAC ───────────────────────────
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: otel-k8s-events
+  namespace: observability
+  labels:
+    app.kubernetes.io/name: otel-k8s-events
+    app.kubernetes.io/component: event-collector
+    app.kubernetes.io/part-of: golden-pipeline
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: otel-k8s-events
+  labels:
+    app.kubernetes.io/name: otel-k8s-events
+    app.kubernetes.io/part-of: golden-pipeline
+rules:
+  # k8seventsreceiver needs to watch events across all namespaces
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["get", "list", "watch"]
+  # Namespace metadata for enrichment
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list"]
+  # LeaderElection via Lease objects
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: otel-k8s-events
+  labels:
+    app.kubernetes.io/name: otel-k8s-events
+    app.kubernetes.io/part-of: golden-pipeline
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: otel-k8s-events
+subjects:
+  - kind: ServiceAccount
+    name: otel-k8s-events
+    namespace: observability
+
+---
+# ── AIRS AI Agent RBAC (ConfigMap Patching) ──────────────────
+# Allows the AI agent to dynamically patch Vector ConfigMaps
+# for the Dynamic Verbosity Override feature (Section 5.1)
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: airs-agent
+  namespace: observability
+  labels:
+    app.kubernetes.io/name: airs-agent
+    app.kubernetes.io/part-of: golden-pipeline
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: airs-configmap-patcher
+  namespace: observability
+  labels:
+    app.kubernetes.io/name: airs-agent
+    app.kubernetes.io/part-of: golden-pipeline
+rules:
+  # Narrowly scoped: can only patch ConfigMaps in observability namespace
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "patch"]
+    resourceNames:
+      - vector-aggregator-config
+      - vector-edge-config
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: airs-configmap-patcher
+  namespace: observability
+  labels:
+    app.kubernetes.io/name: airs-agent
+    app.kubernetes.io/part-of: golden-pipeline
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: airs-configmap-patcher
+subjects:
+  - kind: ServiceAccount
+    name: airs-agent
+    namespace: observability

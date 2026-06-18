@@ -1,0 +1,175 @@
+# ═══════════════════════════════════════════════════════════════
+# 10-otel-k8sattributes-patch.yaml
+# Golden Blueprint — OTel Collector k8sattributes Hardening
+#
+# Purpose:
+#   1. Add k8sattributes processor to the traces pipeline so that
+#      k8s.pod.name / k8s.pod.uid are injected into spans BEFORE
+#      the spanmetrics connector synthesises RED metrics.
+#      Without this, service_name → pod resolution falls back to
+#      fragile label selectors that break during rolling updates.
+#
+#   2. Add transform/sanitize_spans processor to normalise dynamic
+#      HTTP path segments (UUIDs, numeric IDs) in span names before
+#      spanmetrics converts them to metric dimensions, preventing
+#      cardinality explosions.
+#
+#   3. Grant the OTel Collector ServiceAccount the RBAC permissions
+#      needed for the k8sattributes processor to query pod metadata.
+#
+# Pipeline ordering enforced:
+#   receivers[otlp]
+#     → processors[k8sattributes, transform/sanitize_spans, batch]
+#     → exporters[spanmetrics]   (connector bridge → metrics pipeline)
+#
+# References:
+#   - ADR from implementation_plan.md §1.1
+#   - https://opentelemetry.io/docs/collector/transforming-telemetry/
+# ═══════════════════════════════════════════════════════════════
+
+# ── RBAC: ClusterRole for k8sattributes pod-watch ─────────────
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: otel-collector-k8sattributes
+  labels:
+    app.kubernetes.io/name: otel-collector
+    app.kubernetes.io/component: k8s-metadata-reader
+    app.kubernetes.io/part-of: golden-blueprint
+rules:
+  # k8sattributes processor needs to watch pods, namespaces, nodes
+  # to build its internal metadata cache keyed by pod IP.
+  - apiGroups: [""]
+    resources: ["pods", "namespaces", "nodes"]
+    verbs: ["get", "list", "watch"]
+  # ReplicaSets are needed to propagate deployment name onto pods
+  - apiGroups: ["apps"]
+    resources: ["replicasets"]
+    verbs: ["get", "list", "watch"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: otel-collector-k8sattributes
+  labels:
+    app.kubernetes.io/name: otel-collector
+    app.kubernetes.io/part-of: golden-blueprint
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: otel-collector-k8sattributes
+subjects:
+  # Update this to match the actual ServiceAccount used by the
+  # OTel Collector Deployment in the SREGym helm chart.
+  - kind: ServiceAccount
+    name: opentelemetry-collector
+    namespace: monitoring
+
+---
+# ── OTel Collector ConfigMap patch ────────────────────────────
+# This ConfigMap is intended to be applied as an overlay via
+# Kustomize (referenced in kustomization.yaml) against the
+# base OTel Collector Helm release in the monitoring namespace.
+#
+# To apply manually:
+#   kubectl apply -f 10-otel-k8sattributes-patch.yaml -n monitoring
+#
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: otel-collector-k8sattributes-config
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: otel-collector
+    app.kubernetes.io/part-of: golden-blueprint
+data:
+  # The full collector config block — merge this into the base
+  # OTel Collector values.yaml under collector.config.
+  otelcol-patch.yaml: |
+    processors:
+      # ── k8sattributes: inject pod metadata into every span ──────
+      # MUST be placed before spanmetrics in the traces pipeline.
+      # Uses the span's originating connection IP to look up the
+      # pod that emitted it, then upserts resource attributes.
+      k8sattributes:
+        auth_type: "serviceAccount"
+        # Passthrough mode: adds attributes without blocking spans
+        passthrough: false
+        extract:
+          metadata:
+            - k8s.pod.name
+            - k8s.pod.uid
+            - k8s.namespace.name
+            - k8s.node.name
+            - k8s.deployment.name
+            - k8s.replicaset.name
+          # Propagate pod labels as span resource attributes
+          labels:
+            - tag_name: k8s.pod.label.app
+              key: app
+              from: pod
+            - tag_name: k8s.pod.label.service
+              key: io.kompose.service
+              from: pod
+        pod_association:
+          # Primary: match span's originating connection IP to pod IP
+          - sources:
+              - from: connection
+          # Fallback: use k8s.pod.ip attribute if connection IP unavailable
+          - sources:
+              - from: resource_attribute
+                name: k8s.pod.ip
+
+      # ── transform/sanitize_spans: normalise dynamic span names ──
+      # Prevents cardinality explosion when HTTP paths contain
+      # user IDs, UUIDs, or raw DB query strings.
+      # Must run AFTER k8sattributes (needs enriched attributes),
+      # BEFORE spanmetrics (before metric dimension synthesis).
+      transform/sanitize_spans:
+        trace_statements:
+          - context: span
+            statements:
+              # Normalise numeric path segments: /hotels/42 → /hotels/?
+              - replace_pattern(attributes["http.route"], "/[0-9]+", "/?")
+              # Normalise UUID path segments
+              - replace_pattern(attributes["http.route"], "/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", "/?uuid")
+              # Normalise hex strings (container hashes, etc.)
+              - replace_pattern(attributes["http.route"], "/[0-9a-f]{12,}", "/?hash")
+              # If http.route is absent, truncate http.target to the path
+              # without query string to prevent query param cardinality
+              - replace_pattern(attributes["http.target"], "\\?.*$", "")
+
+    service:
+      pipelines:
+        # Traces pipeline — enforced ordering:
+        #   receivers → k8sattributes → sanitize → batch → spanmetrics
+        traces:
+          receivers: [otlp]
+          processors: [k8sattributes, transform/sanitize_spans, batch]
+          exporters: [spanmetrics]
+
+        # Metrics pipeline — receives synthesised RED metrics from connector
+        metrics:
+          receivers: [spanmetrics]
+          processors: [batch]
+          exporters: [otlp]
+
+      # spanmetrics connector: produce only stable-cardinality dimensions
+      # NOTE: This block configures the connector, not a processor.
+      connectors:
+        spanmetrics:
+          histogram:
+            explicit:
+              buckets: [5ms, 10ms, 25ms, 50ms, 100ms, 250ms, 500ms, 1s, 2.5s, 5s, 10s]
+          dimensions:
+            # Stable, low-cardinality dimensions only
+            - name: service.name
+            - name: k8s.namespace.name
+            - name: k8s.pod.name       # Now available thanks to k8sattributes
+            - name: k8s.deployment.name
+            - name: span.kind
+          # Cardinality guard: drop dimensions that would exceed this limit
+          dimensions_cache_size: 10000
+          # Emit metrics compatible with existing Prometheus alert rules
+          metrics_flush_interval: 15s

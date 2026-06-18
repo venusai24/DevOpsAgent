@@ -1,0 +1,11 @@
+#cloud-config
+package_upgrade: true
+packages:
+  - docker.io
+runcmd:
+  - systemctl enable docker
+  - systemctl start docker
+  # Start Prometheus with remote-write enabled
+  - docker run -d -p 9090:9090 --name prometheus prom/prometheus --web.enable-remote-write-receiver
+  # Start Jaeger all-in-one with OTLP enabled
+  - docker run -d --name jaeger -e COLLECTOR_OTLP_ENABLED=true -p 16686:16686 -p 4317:4317 -p 4318:4318 jaegertracing/all-in-one:latest

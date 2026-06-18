@@ -72,7 +72,7 @@ Rules:
 - template_key: snake_case identifier (e.g. "kafka_producer_timeout")
 - regex_pattern: a simple Python regex that would match this exact pattern
   in future logs.  Use \\d+ for numbers, .* for variable text.
-  The regex must compile without error.
+  The regex must compile without error. Do NOT use Python's raw string `r""` prefix in the JSON; use standard JSON string escaping (e.g., "\\\\d+").
 - description: one short sentence describing the failure class
 - confidence: float 0.0–1.0 reflecting how certain you are this is a
   real failure pattern (not normal INFO noise)

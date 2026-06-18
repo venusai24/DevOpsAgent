@@ -57,20 +57,30 @@ def test_k8s_discovery_mocked(mock_client, mock_config):
     # Run the topology discovery
     graph = ContextGraph()
     graph._g.clear() # clear fixtures
-    
-    os.environ["AIRS_USE_K8S"] = "true"
-    graph.load_from_k8s(["test-ns"])
-    
+
+    # ── IMPORTANT: restore env variable after test to prevent session pollution.
+    # Without this, all subsequent ContextGraph() calls in the session use
+    # load_from_k8s() instead of load_from_fixtures(), breaking downstream tests.
+    _prev_k8s = os.environ.get("AIRS_USE_K8S")
+    try:
+        os.environ["AIRS_USE_K8S"] = "true"
+        graph.load_from_k8s(["test-ns"])
+    finally:
+        if _prev_k8s is None:
+            os.environ.pop("AIRS_USE_K8S", None)
+        else:
+            os.environ["AIRS_USE_K8S"] = _prev_k8s
+
     nodes = list(graph._g.nodes())
     edges = list(graph._g.edges())
-    
+
     assert "checkout-deployment" in nodes
     assert "checkout-service" in nodes
     assert "checkout-vs" in nodes
-    
+
     assert graph._g.nodes["checkout-deployment"]["node_type"] == "service"
     assert graph._g.nodes["checkout-deployment"]["health_status"] == "healthy"
-    
+
     # Validate dynamic edges: VS -> Service -> Deployment
     assert ("checkout-vs", "checkout-service") in edges
     assert ("checkout-service", "checkout-deployment") in edges

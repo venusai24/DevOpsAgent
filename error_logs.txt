@@ -1,0 +1,56 @@
+🚀 Initializing Kubernetes client...
+🔍 Fetching pods in namespace: 'hotel-reservation'...
+⚠️ Found 2 unhealthy or crashing pods:
+ - recommendation-7d9cd764ff-q4n5b
+ - user-66d5d6f874-m5mzd
+📋 Gathering error indicators and events for pod 'recommendation-7d9cd764ff-q4n5b' (recommendation)...
+📋 Gathering error indicators and events for pod 'user-66d5d6f874-m5mzd' (user)...
+
+🎯 Targets identified: Focal Service = 'recommendation'
+
+📝 Collected Error Context:
+------------------------------------------------------------
+ERROR: [Container Waiting] Pod recommendation-7d9cd764ff-q4n5b container hotel-reserv-recommendation is waiting (CrashLoopBackOff): back-off 2m40s restarting failed container=hotel-reserv-recommendation pod=recommendation-7d9cd764ff-q4n5b_hotel-reservation(e6a252ed-bf58-4363-87ca-69366dbaefdb)
+WARNING: [K8s Event] Pod recommendation-7d9cd764ff-q4n5b warning (Unhealthy): Liveness probe failed: Get "http://10.244.162.172:8080/healthz": dial tcp 10.244.162.172:8080: connect: connection refused
+WARNING: [K8s Event] Pod recommendation-7d9cd764ff-q4n5b warning (BackOff): Back-off restarting failed container hotel-reserv-recommendation in pod recommendation-7d9cd764ff-q4n5b_hotel-reservation(e6a252ed-bf58-4363-87ca-69366dbaefdb)
+WARNING: [K8s Event] Pod user-66d5d6f874-m5mzd warning (BackOff): Back-off restarting failed container hotel-reserv-user in pod user-66d5d6f874-m5mzd_hotel-reservation(d75bce05-43f5-49b9-9c70-b68863abf2a3)
+------------------------------------------------------------
+
+🧠 Routing live errors through AIRS perception layer (LogRouter)...
+🌐 Building live Kubernetes context graph topology...
+🔮 Executing neuro-symbolic reasoning engine analysis...
+
+============================================================
+============== LIVE INCIDENT ANALYSIS REPORT ===============
+============================================================
+# Incident Analysis — `recommendation`
+
+**Symbolic Path**: 🔵 `SYMBOLIC_FAST`  | **Overall Confidence**: 100%
+
+## Perception Summary
+## NeSy-Edge Perception Report
+**Primary Pattern**: `pod_crash_loop`
+**Tier Stats**: L1=4 L2=0 L3=0 (L1 rate: 100%)
+
+### Classified Entries
+- 🔵 `[L1]` **pod_crash_loop** (conf=100%): ERROR: [Container Waiting] Pod recommendation-7d9cd764ff-q4n5b container hotel-r
+- 🔵 `[L1]` **pod_crash_loop** (conf=100%): WARNING: [K8s Event] Pod recommendation-7d9cd764ff-q4n5b warning (Unhealthy): Li
+- 🔵 `[L1]` **pod_crash_loop** (conf=100%): WARNING: [K8s Event] Pod recommendation-7d9cd764ff-q4n5b warning (BackOff): Back
+- 🔵 `[L1]` **pod_crash_loop** (conf=100%): WARNING: [K8s Event] Pod user-66d5d6f874-m5mzd warning (BackOff): Back-off resta
+
+## Causal Graph
+## Causal Graph — `recommendation`
+**Nodes**: 1  |  **Edges**: 0
+
+
+### Symptom Node (Focal Service)
+- 🎯 **recommendation** (tier=3)
+
+## Root Cause Candidates
+### #1 `recommendation` (score=1.00) ⚠️ *stale metrics*
+- **Template**: `pod_crash_loop`
+- **Propagation**: `recommendation` [depends_on]
+- **On-call**: —
+
+============================================================
+Result for liveness_probe_misconfiguration_hotel_reservation: ❌ FAIL
