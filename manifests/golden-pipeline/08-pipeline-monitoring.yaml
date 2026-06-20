@@ -14,7 +14,7 @@ apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
   name: vector-edge
-  namespace: observability
+  namespace: observe
   labels:
     app.kubernetes.io/name: vector-edge
     app.kubernetes.io/part-of: golden-pipeline
@@ -38,7 +38,7 @@ apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
   name: vector-aggregator
-  namespace: observability
+  namespace: observe
   labels:
     app.kubernetes.io/name: vector-aggregator
     app.kubernetes.io/part-of: golden-pipeline
@@ -61,7 +61,7 @@ apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
   name: otel-k8s-events
-  namespace: observability
+  namespace: observe
   labels:
     app.kubernetes.io/name: otel-k8s-events
     app.kubernetes.io/part-of: golden-pipeline
@@ -91,7 +91,7 @@ apiVersion: monitoring.coreos.com/v1
 kind: PrometheusRule
 metadata:
   name: golden-pipeline-alerts
-  namespace: observability
+  namespace: observe
   labels:
     app.kubernetes.io/part-of: golden-pipeline
     release: prometheus

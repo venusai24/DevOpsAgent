@@ -1,0 +1,63 @@
+[
+  {
+    "fault_id": "cartFailure",
+    "category": "Cache / Valkey Failure",
+    "description": "Activates the cartFailure flag, which disconnects the Cart service from its Valkey (Redis-compatible) store and causes all cart operations to fail, simulating an OOM-evicted cache.",
+    "feature_flag_key": "cartFailure",
+    "sed_pattern": "cartFailure",
+    "expected_root_cause": "The Valkey cache instance backing the Cart service is unreachable or in an OOM state. Cart service throws repeated connection-refused / NOAUTH errors, driving HTTP 5xx on all checkout flows.",
+    "expected_mitigation": "Purge and restart the Valkey container. If OOM, increase memory limits in compose.yaml. Cart service will auto-reconnect once the store is healthy.",
+    "prometheus_signal": "rpc_server_duration_milliseconds (cart service) shows P95 spike; otelcol spanmetrics shows high error rate on /hipstershop.CartService/AddItem."
+  },
+  {
+    "fault_id": "recommendationCacheFailure",
+    "category": "Application Cache Failure",
+    "description": "Activates the recommendationCacheFailure flag, which disables recommendation caching and causes every recommendation request to hit the model backend cold, producing latency spikes and potential timeouts.",
+    "feature_flag_key": "recommendationCacheFailure",
+    "sed_pattern": "recommendationCacheFailure",
+    "expected_root_cause": "Recommendation service cache is disabled. Every product recommendation call incurs a full model inference round-trip, driving P95 latency above acceptable SLO thresholds.",
+    "expected_mitigation": "Re-enable the cache by toggling the flag off. If underlying model service is slow, scale it horizontally or add a circuit breaker with stale-cache fallback.",
+    "prometheus_signal": "rpc_server_duration_milliseconds (recommendation service) P95 exceeds baseline by 3-5x."
+  },
+  {
+    "fault_id": "loadGeneratorFloodHomepage",
+    "category": "Traffic Surge / DDoS Simulation",
+    "description": "Activates the loadGeneratorFloodHomepage flag, which instructs the load generator to send a flood of requests exclusively to the frontend homepage, simulating a traffic spike or bot storm.",
+    "feature_flag_key": "loadGeneratorFloodHomepage",
+    "sed_pattern": "loadGeneratorFloodHomepage",
+    "expected_root_cause": "Massive inbound request volume overwhelms the frontend service, driving CPU saturation, queue depth spikes, and cascading latency across upstream dependencies.",
+    "expected_mitigation": "Toggle flag off to cease the flood. In production: implement rate limiting at the reverse proxy layer and add auto-scaling triggers on frontend CPU utilization.",
+    "prometheus_signal": "http_server_request_duration (frontend) shows P95 latency explosion; request throughput doubles or triples vs baseline."
+  },
+  {
+    "fault_id": "kafkaQueueProblems",
+    "category": "Message Broker Backlog",
+    "description": "Activates the kafkaQueueProblems flag, which overloads the Kafka queue while simultaneously introducing a consumer-side processing delay, producing a consumer-lag spike and eventual queue saturation.",
+    "feature_flag_key": "kafkaQueueProblems",
+    "sed_pattern": "kafkaQueueProblems",
+    "expected_root_cause": "Kafka consumer group lag spikes due to producer overload combined with artificial consumer-side delay. Order processing pipeline stalls; order events accumulate in the queue faster than they are consumed.",
+    "expected_mitigation": "Toggle flag off. Scale Kafka consumer replicas. If lag persists, manually reset consumer offset or perform partition rebalance.",
+    "prometheus_signal": "kafka_consumer_group_lag (kafka / accounting consumer) shows exponential growth."
+  },
+  {
+    "fault_id": "adFailure",
+    "category": "Microservice Failure",
+    "description": "Activates the adFailure flag, which causes the Ad service to return errors on all ad requests, simulating a full service crash.",
+    "feature_flag_key": "adFailure",
+    "sed_pattern": "adFailure",
+    "expected_root_cause": "Ad service is failing all requests. Frontend receives degraded responses; any component dependent on ad data experiences increased error rates.",
+    "expected_mitigation": "Toggle flag off. In production: ensure Ad service has liveness probes and auto-restart policy. Implement a circuit breaker on the frontend to gracefully degrade when Ad service is unavailable.",
+    "prometheus_signal": "rpc_server_duration_milliseconds (ad service) shows near-100% error rate; frontend latency may increase due to timeout waits."
+  },
+  {
+    "fault_id": "paymentFailure",
+    "category": "Payment Processing Failure",
+    "description": "Activates the paymentFailure flag at 100%, which causes the Payment service to fail all charge requests, simulating a payment processor outage.",
+    "feature_flag_key": "paymentFailure",
+    "sed_pattern": "paymentFailure",
+    "variant_on": "100%",
+    "expected_root_cause": "Payment service rejects all charge requests. All checkout flows that reach the payment step fail, causing 100% checkout failure rate.",
+    "expected_mitigation": "Toggle flag off. In production: implement retry logic with exponential backoff, fail-over to a secondary payment processor, and alert the on-call team immediately.",
+    "prometheus_signal": "rpc_server_duration_milliseconds (payment service) shows 100% error rate on /hipstershop.PaymentService/Charge."
+  }
+]

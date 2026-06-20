@@ -194,7 +194,8 @@ class L3LLMFallback:
                 model=self._model,
                 temperature=0,
                 max_retries=2,
-            ).bind(response_format={"type": "json_object"})
+                max_tokens=4096,
+            )
         return self._llm
 
     async def _invoke_llm(self, log_entry: str) -> str:
@@ -236,15 +237,19 @@ def _parse_l3_response(raw: str, log_entry: str) -> L3Result:
     """
     data: Optional[dict] = None
 
+    # Strip <think> blocks, including cases where the API truncated the response before </think>
+    import re
+    raw_cleaned = re.sub(r"<think>.*?(?:</think>|$)", "", raw, flags=re.DOTALL).strip()
+
     # Layer 1: direct JSON parse
     try:
-        data = json.loads(raw)
+        data = json.loads(raw_cleaned)
     except json.JSONDecodeError:
         pass
 
     # Layer 2: extract first JSON object
     if data is None:
-        match = re.search(r"\{.*?\}", raw, re.DOTALL)
+        match = re.search(r"\{.*?\}", raw_cleaned, re.DOTALL)
         if match:
             try:
                 data = json.loads(match.group())

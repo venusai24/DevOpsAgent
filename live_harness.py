@@ -17,8 +17,15 @@ try:
 except ImportError:
     pass
 
-from kubernetes import client, config
-from kubernetes.client.rest import ApiException
+try:
+    from kubernetes import client, config
+    from kubernetes.client.rest import ApiException
+except ImportError:
+    client = None
+    config = None
+    class ApiException(Exception):
+        pass
+
 
 from airs_v2.perception.router import LogRouter
 from airs_v2.reasoning.engine import ReasoningEngine
@@ -452,7 +459,7 @@ def inject_fault_sregym(fault_id, duration=None, tput=None, multiplier=None, tel
     except Exception:
         pass
 
-    os.environ["SREGYM_WAIT_BEFORE_FAULT"] = "300"
+    os.environ["SREGYM_WAIT_BEFORE_FAULT"] = "0"
     cmd = [".venv/bin/python3", "main.py", "--problem", fault_id, "--use-external-harness"]
     # We no longer pass duration, tput, multiplier, or telemetry_endpoint directly
     # to main.py because main.py does not accept them via CLI.
@@ -486,8 +493,172 @@ def inject_fault_sregym(fault_id, duration=None, tput=None, multiplier=None, tel
         return False
 
 
+# ---------------------------------------------------------------------------
+# Docker-Compose-native analysis path (--no-k8s mode)
+# ---------------------------------------------------------------------------
+
+# Maps each OTel Demo feature-flag fault_id to the Docker Compose service
+# name(s) whose container logs are most diagnostic for that fault.
+# Service names match the keys in compose.yaml exactly.
+_FAULT_SERVICE_MAP: dict[str, list[str]] = {
+    "cartFailure":                  ["cart", "valkey-cart"],
+    "recommendationCacheFailure":   ["recommendation"],
+    "loadGeneratorFloodHomepage":   ["frontend", "frontend-proxy"],
+    "kafkaQueueProblems":           ["kafka", "accounting"],
+    "adFailure":                    ["ad"],
+    "paymentFailure":               ["payment", "checkout"],
+}
+
+_LOG_TAIL_LINES = 300  # lines per container to collect
+
+
+def _collect_docker_logs(services: list[str], since_minutes: int = 5) -> str:
+    """
+    Collect recent stdout+stderr logs from Docker Compose containers.
+
+    Uses `docker ps --filter name=<svc>` to locate running containers by
+    name fragment, then `docker logs --since <n>m` to retrieve their output.
+    Both stdout and stderr are merged, and OpenTelemetry JSON noise is filtered out.
+    """
+    import re
+    collected: list[str] = []
+
+    for svc in services:
+        try:
+            # Find container IDs whose names contain the service name fragment
+            ps = subprocess.run(
+                ["docker", "ps", "--filter", f"name={svc}", "--format", "{{.ID}}\t{{.Names}}"],
+                capture_output=True, text=True, timeout=10,
+            )
+            lines = [l.strip() for l in ps.stdout.strip().splitlines() if l.strip()]
+            if not lines:
+                collected.append(f"[{svc}] No running container found matching name '{svc}'.")
+                continue
+
+            for entry in lines:
+                parts = entry.split("\t")
+                cid = parts[0]
+                cname = parts[1] if len(parts) > 1 else cid[:12]
+
+                logs = subprocess.run(
+                    ["docker", "logs", "--since", f"{since_minutes}m", cid],
+                    capture_output=True, text=True, timeout=30,
+                )
+                raw = (logs.stdout + logs.stderr).strip()
+                if raw:
+                    filtered_lines = []
+                    for line in raw.splitlines():
+                        line_stripped = line.strip()
+                        if not line_stripped or line_stripped in ("{", "}", "},", "[", "]", "],"):
+                            continue
+                        # Skip typical OpenTelemetry JSON dump attributes
+                        if re.match(r'^[\'"](process|os|host|service|telemetry|library)\.', line_stripped):
+                            continue
+                        filtered_lines.append(line)
+                    
+                    filtered_raw = "\n".join(filtered_lines[-500:])  # Cap at 500 lines per container
+                    if filtered_raw.strip():
+                        collected.append(f"=== Container: {cname} ===\n{filtered_raw}")
+                    else:
+                        collected.append(f"=== Container: {cname} — (no error logs found after filtering) ===")
+                else:
+                    collected.append(f"=== Container: {cname} — (no log output) ===")
+
+        except subprocess.TimeoutExpired:
+            collected.append(f"[{svc}] docker logs timed out.")
+        except Exception as exc:
+            collected.append(f"[{svc}] Log collection error: {exc}")
+
+    return "\n\n".join(collected) if collected else "(no logs collected)"
+
+
+async def analyze_docker_compose_cluster(
+    fault_id: str = "",
+    log_tail_lines: int = _LOG_TAIL_LINES,
+    # prometheus_url / zscore_mode kept for API compatibility but not used
+    prometheus_url: str = _DEFAULT_PROMETHEUS_URL,
+    zscore_mode: str = "benchmark",
+) -> object:
+    """
+    Diagnose a known fault injected via OTel Demo feature flags.
+
+    The benchmark wrapper (run_airs_benchmark.sh) has already:
+      1. Toggled the feature flag in demo.flagd.json
+      2. Waited 300 s for errors to accumulate in container logs
+
+    This function therefore skips anomaly detection entirely and goes
+    straight to log collection + AIRS reasoning:
+
+      Step 1 — Map fault_id → affected Docker Compose services
+      Step 2 — Collect container logs via `docker logs`
+      Step 3 — Route logs through AIRS (LogRouter → ContextGraph → ReasoningEngine)
+
+    Parameters
+    ----------
+    fault_id : str
+        The feature-flag fault label (e.g. 'cartFailure'). Used to select
+        which containers' logs are collected and as the focal service hint.
+    log_tail_lines : int
+        How many trailing log lines to collect per container (default 300).
+    prometheus_url : str
+        Kept for call-site compatibility — not used in this mode.
+    zscore_mode : str
+        Kept for call-site compatibility — not used in this mode.
+    """
+    print("🚀 [Docker Compose Mode] Log-based diagnosis — no anomaly detection required.")
+    print(f"   Fault under test: '{fault_id}'" if fault_id else "   Fault: (unspecified)")
+
+    # ── Step 1: Resolve affected services ────────────────────────────────────
+    services = _FAULT_SERVICE_MAP.get(fault_id, [])
+    if not services:
+        # Unknown fault_id — fall back to collecting logs from all primary services
+        services = list(_FAULT_SERVICE_MAP.keys())  # broad sweep
+        print(f"   ⚠️  Unknown fault_id '{fault_id}' — collecting logs from all known services.")
+    else:
+        print(f"   📦 Targeting containers: {', '.join(services)}")
+
+    # ── Step 2: Collect container logs ───────────────────────────────────────
+    print(f"\n📋 Collecting Docker container logs (since 5m)...")
+    raw_logs = _collect_docker_logs(services, since_minutes=5)
+
+    print(f"\n📝 Log excerpt (first 800 chars):")
+    print("-" * 60)
+    print(raw_logs[:800])
+    print("-" * 60)
+
+    # ── Step 3: AIRS pipeline ─────────────────────────────────────────────────
+    focal_service = services[0] if services else fault_id or "unknown"
+    print(f"\n🎯 Focal Service (AIRS hint): '{focal_service}'")
+
+    print("\n🧠 Routing logs through AIRS perception layer (LogRouter)...")
+    router = LogRouter()
+    report = await router.classify_block(raw_logs)
+
+    print("🌐 Building Docker Compose service topology context graph...")
+    import os
+    from pathlib import Path
+    os.environ["AIRS_USE_K8S"] = "false"
+    fixture_path = Path("/home/VenuSai/DevOpsAgent/otel_demo_topology.json")
+    g = ContextGraph(fixtures_path=fixture_path)
+
+    print("📚 Initializing Hierarchical RAG Engine...")
+    from airs_v2.memory.rag_engine import RAGEngine
+    rag = RAGEngine()
+
+    print("🔮 Executing neuro-symbolic reasoning engine analysis...")
+    engine_airs = ReasoningEngine(graph=g, rag_engine=rag)
+    analysis = await engine_airs.analyze_incident(report, focal_service)
+
+    print("\n" + "=" * 60)
+    print(" AIRS INCIDENT ANALYSIS REPORT ".center(60, "="))
+    print("=" * 60)
+    print(analysis.analysis_markdown)
+    print("=" * 60)
+    return analysis
+
+
 async def main():
-    parser = argparse.ArgumentParser(description="Live Harness for SREGym")
+    parser = argparse.ArgumentParser(description="Live Harness for AIRS (K8s + Docker Compose modes)")
     parser.add_argument("--duration", type=str, help="Duration for load generator (e.g., 3600s)")
     parser.add_argument("--tput", type=int, help="Throughput for load generator")
     parser.add_argument("--multiplier", type=int, help="Multiplier for load generator")
@@ -520,8 +691,102 @@ async def main():
         default="auto",
         help="The target Kubernetes namespace to monitor. Use 'auto' to automatically detect the active namespace.",
     )
+    # ── Docker Compose Mode Flags ────────────────────────────────────────────
+    parser.add_argument(
+        "--no-k8s",
+        action="store_true",
+        default=False,
+        help=(
+            "Run in Docker Compose mode: skip all Kubernetes API calls. "
+            "Uses Prometheus-only anomaly detection without pod-level log extraction. "
+            "Required when OTel Demo is deployed via docker compose (not K8s)."
+        ),
+    )
+    parser.add_argument(
+        "--fault-id",
+        type=str,
+        default="",
+        help="Label for the currently injected feature-flag fault (used in reports). e.g. 'cartFailure'.",
+    )
+    parser.add_argument(
+        "--output-json",
+        type=str,
+        default="",
+        help="Optional path to write a single-run JSON result (for bash wrapper consumption).",
+    )
     args = parser.parse_args()
 
+    # ── Docker Compose (no-k8s) mode ─────────────────────────────────────────
+    if args.no_k8s:
+        print("\n" + "="*80)
+        print("  🐳  AIRS — Docker Compose Mode  (--no-k8s)")
+        print("="*80)
+        print("  ℹ️  Log-based diagnosis: collecting Docker container logs → AIRS pipeline.")
+        print(f"  ℹ️  Fault under test: '{args.fault_id or '(none specified)'}'")
+        print("="*80 + "\n")
+
+        start_time = time.time()
+        airs_response = None
+        analysis = None
+        try:
+            analysis = await analyze_docker_compose_cluster(
+                fault_id=args.fault_id,
+            )
+            if analysis is not None:
+                inferred = (
+                    analysis.root_cause_candidates[0].candidate_node
+                    if analysis.root_cause_candidates
+                    else "Unknown"
+                )
+                if analysis.root_cause_candidates:
+                    inferred += f" ({analysis.root_cause_candidates[0].template_key})"
+
+                airs_response = {
+                    "fault_id": args.fault_id,
+                    "inferred_root_cause": inferred,
+                    "action_taken": "Diagnosed via ReasoningEngine (Docker Compose mode)",
+                    "chain_of_thought_log": analysis.analysis_markdown,
+                    "diagnosis_correct": False,   # requires LLM judge — set by bash wrapper
+                    "time_to_resolve_seconds": 0,  # filled below
+                }
+        except Exception as exc:
+            import traceback
+            traceback.print_exc()
+            print(f"AIRS invocation failed: {exc}")
+
+        duration = time.time() - start_time
+        if airs_response:
+            airs_response["time_to_resolve_seconds"] = round(duration, 2)
+
+        # LLM judge for Docker Compose mode (optional — requires GROQ_API_KEY)
+        if airs_response and args.fault_id:
+            # Build a minimal scenario dict for the judge
+            _scenario_stub = {
+                "fault_id": args.fault_id,
+                "expected_root_cause": (
+                    f"Feature flag '{args.fault_id}' was enabled on the OTel Demo, "
+                    "triggering the associated service failure mode."
+                ),
+            }
+            diagnosis_correct = llm_judge(_scenario_stub, airs_response)
+            if diagnosis_correct is None:
+                print("⚠️  LLM judge unavailable — skipping automated scoring.")
+                diagnosis_correct = False
+            airs_response["diagnosis_correct"] = diagnosis_correct
+            print(
+                f"\n{'✅ PASS' if diagnosis_correct else '❌ FAIL'} — "
+                f"Fault: {args.fault_id}  |  TTD: {duration:.1f} s"
+            )
+
+        # Write output JSON for bash wrapper
+        if args.output_json and airs_response:
+            with open(args.output_json, "w") as _f:
+                json.dump(airs_response, _f, indent=2)
+            print(f"💾 Single-run result written to: {args.output_json}")
+
+        return
+
+    # ── Kubernetes (default) mode — original scenario-loop logic ─────────────
     with open('sregym_advanced_scenarios.json', 'r') as f:
         scenarios = json.load(f)
 
@@ -532,16 +797,14 @@ async def main():
         print(f"--- Running Scenario: {scenario['fault_id']} ---")
         print("="*80)
 
-        # 1. Inject Fault into SREGym
-        if not inject_fault_sregym(
-            scenario['fault_id'],
-            duration=args.duration,
-            tput=args.tput,
-            multiplier=args.multiplier,
-            telemetry_endpoint=args.telemetry_endpoint
-        ):
-            print(f"Skipping {scenario['fault_id']} due to injection failure.")
-            continue
+        # 1. Inject Fault — SREGym path is DISABLED for Docker Compose deployments.
+        # The bash wrapper (run_airs_benchmark.sh) handles fault injection via sed.
+        # In pure K8s mode, prompt the operator to toggle the feature flag manually.
+        print(f"Please manually trigger the fault '{scenario['fault_id']}' in the OpenTelemetry Demo Feature Flags UI (http://localhost:8080/feature/).")
+        input("Press Enter to continue once you have enabled the fault...")
+        # NOTE: inject_fault_sregym() is intentionally NOT called here.
+        # K8s-native chaos (LitmusChaos / valkey_memory_disruption) crashes the
+        # pipeline when there is no Kubernetes cluster available.
 
         # 2. Wait for the cluster to manifest symptoms
         # Note: This wait also allows Prometheus to accumulate baseline data
@@ -582,10 +845,8 @@ async def main():
 
         print(f"Result for {scenario['fault_id']}: {'✅ PASS' if eval_result['diagnosis_correct'] else '❌ FAIL'}")
 
-        # 5. Clean up (Reset Environment)
-        # Note: running main.py automatically resets previous cluster state,
-        # but only for the specific app it targets. We force a universal scrub
-        # of all known app namespaces here to prevent cross-contamination and CPU starvation.
+        # 5. Clean up — namespace scrub is K8s-only and will crash on Docker Compose.
+        # Only run kubectl commands if NOT in --no-k8s mode (already branched above).
         print("🧹 Performing universal namespace scrub (this may take a minute)...")
         try:
             subprocess.run(

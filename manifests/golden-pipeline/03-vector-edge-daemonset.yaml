@@ -6,7 +6,7 @@ apiVersion: apps/v1
 kind: DaemonSet
 metadata:
   name: vector-edge
-  namespace: observability
+  namespace: observe
   labels:
     app.kubernetes.io/name: vector-edge
     app.kubernetes.io/component: edge-agent
@@ -65,10 +65,10 @@ spec:
           resources:
             requests:
               cpu: 100m
-              memory: 128Mi
+              memory: 256Mi
             limits:
               cpu: 200m
-              memory: 256Mi
+              memory: 512Mi
           # ── Volume Mounts ─────────────────────────────────
           volumeMounts:
             - name: config
@@ -118,7 +118,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: vector-edge-config
-  namespace: observability
+  namespace: observe
   labels:
     app.kubernetes.io/name: vector-edge
     app.kubernetes.io/part-of: golden-pipeline

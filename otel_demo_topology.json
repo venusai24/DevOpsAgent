@@ -1,0 +1,166 @@
+{
+  "services": [
+    {
+      "name": "frontend-proxy",
+      "type": "service",
+      "tier": 1,
+      "health_status": "healthy",
+      "owner": "platform",
+      "namespace": "opentelemetry-demo",
+      "depends_on": ["frontend"]
+    },
+    {
+      "name": "frontend",
+      "type": "service",
+      "tier": 2,
+      "health_status": "healthy",
+      "owner": "frontend-team",
+      "namespace": "opentelemetry-demo",
+      "depends_on": ["cart", "checkout", "recommendation", "ad", "currency", "product-catalog"]
+    },
+    {
+      "name": "checkout",
+      "type": "service",
+      "tier": 2,
+      "health_status": "healthy",
+      "owner": "checkout-team",
+      "namespace": "opentelemetry-demo",
+      "depends_on": ["payment", "cart", "shipping", "email", "currency", "product-catalog"]
+    },
+    {
+      "name": "cart",
+      "type": "service",
+      "tier": 2,
+      "health_status": "healthy",
+      "owner": "cart-team",
+      "namespace": "opentelemetry-demo",
+      "depends_on": ["valkey-cart"]
+    },
+    {
+      "name": "valkey-cart",
+      "type": "cache",
+      "tier": 3,
+      "health_status": "healthy",
+      "owner": "platform",
+      "namespace": "opentelemetry-demo",
+      "depends_on": []
+    },
+    {
+      "name": "recommendation",
+      "type": "service",
+      "tier": 3,
+      "health_status": "healthy",
+      "owner": "ml-team",
+      "namespace": "opentelemetry-demo",
+      "depends_on": ["product-catalog"]
+    },
+    {
+      "name": "ad",
+      "type": "service",
+      "tier": 3,
+      "health_status": "healthy",
+      "owner": "ads-team",
+      "namespace": "opentelemetry-demo",
+      "depends_on": []
+    },
+    {
+      "name": "payment",
+      "type": "service",
+      "tier": 2,
+      "health_status": "healthy",
+      "owner": "payments-team",
+      "namespace": "opentelemetry-demo",
+      "depends_on": []
+    },
+    {
+      "name": "shipping",
+      "type": "service",
+      "tier": 3,
+      "health_status": "healthy",
+      "owner": "fulfillment-team",
+      "namespace": "opentelemetry-demo",
+      "depends_on": []
+    },
+    {
+      "name": "email",
+      "type": "service",
+      "tier": 3,
+      "health_status": "healthy",
+      "owner": "notifications-team",
+      "namespace": "opentelemetry-demo",
+      "depends_on": []
+    },
+    {
+      "name": "currency",
+      "type": "service",
+      "tier": 3,
+      "health_status": "healthy",
+      "owner": "platform",
+      "namespace": "opentelemetry-demo",
+      "depends_on": []
+    },
+    {
+      "name": "product-catalog",
+      "type": "service",
+      "tier": 2,
+      "health_status": "healthy",
+      "owner": "catalog-team",
+      "namespace": "opentelemetry-demo",
+      "depends_on": []
+    },
+    {
+      "name": "accounting",
+      "type": "service",
+      "tier": 3,
+      "health_status": "healthy",
+      "owner": "finance-team",
+      "namespace": "opentelemetry-demo",
+      "depends_on": ["kafka"]
+    },
+    {
+      "name": "kafka",
+      "type": "service",
+      "tier": 2,
+      "health_status": "healthy",
+      "owner": "platform",
+      "namespace": "opentelemetry-demo",
+      "depends_on": []
+    },
+    {
+      "name": "load-generator",
+      "type": "service",
+      "tier": 3,
+      "health_status": "healthy",
+      "owner": "platform",
+      "namespace": "opentelemetry-demo",
+      "depends_on": ["frontend-proxy"]
+    }
+  ],
+  "known_failure_correlations": [
+    {
+      "services": ["cart", "valkey-cart"],
+      "description": "Cart service loses all session state when Valkey cache is unavailable.",
+      "historical_incident_ids": ["otel-demo-001"]
+    },
+    {
+      "services": ["checkout", "payment"],
+      "description": "All checkout completions fail when payment service is degraded.",
+      "historical_incident_ids": ["otel-demo-002"]
+    },
+    {
+      "services": ["checkout", "cart"],
+      "description": "Checkout cannot retrieve cart contents when cart service is failing.",
+      "historical_incident_ids": ["otel-demo-003"]
+    },
+    {
+      "services": ["frontend", "ad"],
+      "description": "Frontend degrades gracefully but logs ad service errors on every page load.",
+      "historical_incident_ids": ["otel-demo-004"]
+    },
+    {
+      "services": ["accounting", "kafka"],
+      "description": "Order events are not processed when Kafka consumer lag spikes.",
+      "historical_incident_ids": ["otel-demo-005"]
+    }
+  ]
+}

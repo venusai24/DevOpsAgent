@@ -6,6 +6,7 @@ import subprocess
 import argparse
 import logging
 import asyncio
+import threading
 from pathlib import Path
 
 import urllib.request
@@ -67,7 +68,7 @@ def pre_flight_checks(prometheus_url: str):
     # 3. Check Observability Pods
     print("🔍 Checking observability pipeline pods...")
     try:
-        pods = v1.list_namespaced_pod(namespace="observability")
+        pods = v1.list_namespaced_pod(namespace="observe")
         if not pods.items:
             print("⚠️ No pods found in 'observability' namespace. Is the pipeline deployed?")
             sys.exit(1)
@@ -85,58 +86,97 @@ def pre_flight_checks(prometheus_url: str):
         print(f"❌ Failed to check observability pods: {e}")
         sys.exit(1)
 
+    # 4. Check ClickHouse (Python Client)
+    print("🔍 Checking ClickHouse connectivity from Python...")
+    try:
+        ch_host = os.getenv("CLICKHOUSE_HOST", "clickhouse.observe.svc.cluster.local")
+        ch_port = os.getenv("CLICKHOUSE_PORT", "8123")
+        req = urllib.request.Request(f"http://{ch_host}:{ch_port}/ping")
+        with urllib.request.urlopen(req, timeout=5) as response:
+            if response.status != 200:
+                raise Exception(f"HTTP {response.status}")
+        print("✅ ClickHouse is reachable from Python.")
+    except Exception as e:
+        print(f"❌ ClickHouse connection failed: {e}")
+        print(f"   Attempted to reach: http://{ch_host}:{ch_port}")
+        print("   If you are running outside the cluster, please start a port-forward:")
+        print("   kubectl port-forward svc/clickhouse -n observe 8123:8123 &")
+        print("   And prefix your command with CLICKHOUSE_HOST=localhost")
+        sys.exit(1)
+
     print("✅ All pre-flight checks passed!\n")
     return v1
+
+def health_monitor_thread(stop_event, prom_url, v1):
+    while not stop_event.is_set():
+        if stop_event.wait(60):
+            break
+        print(f"   [Monitor] Checking service health in background...")
+        try:
+            req = urllib.request.Request(f"{prom_url}/api/v1/query?query=up")
+            with urllib.request.urlopen(req, timeout=5) as response:
+                if response.status != 200: raise Exception("Prometheus HTTP check failed")
+            
+            pods = v1.list_namespaced_pod(namespace="observe")
+            for pod in pods.items:
+                if "vector" in pod.metadata.name or "clickhouse" in pod.metadata.name:
+                    if pod.status.phase not in ["Running", "Succeeded"]:
+                        raise Exception(f"Pod {pod.metadata.name} is not Running (Status: {pod.status.phase})")
+                        
+            ch_host = os.getenv("CLICKHOUSE_HOST", "clickhouse.observe.svc.cluster.local")
+            ch_port = os.getenv("CLICKHOUSE_PORT", "8123")
+            ch_req = urllib.request.Request(f"http://{ch_host}:{ch_port}/ping")
+            with urllib.request.urlopen(ch_req, timeout=15) as ch_response:
+                if ch_response.status != 200:
+                    raise Exception(f"ClickHouse HTTP ping returned {ch_response.status}")
+        except Exception as e:
+            print(f"❌ Aborting collection! Service health check failed: {e}")
+            os._exit(1)
 
 async def collect_scenario_data(scenario, args, v1):
     namespace = args.namespace
     fault_id = scenario['fault_id']
     
-    # 1. Inject Fault
-    if not inject_fault_sregym(
-        fault_id,
-        duration=args.duration,
-        tput=args.tput,
-        multiplier=args.multiplier,
-        telemetry_endpoint=args.telemetry_endpoint
-    ):
-        print(f"❌ Skipping {fault_id} due to injection failure.")
-        return False
+    stop_monitor = threading.Event()
+    monitor_thread = threading.Thread(target=health_monitor_thread, args=(stop_monitor, args.prometheus_url, v1), daemon=True)
+    monitor_thread.start()
 
-    wait_time = 300
-    print(f"⏳ Waiting {wait_time}s for symptoms and logs to accumulate...")
-    time.sleep(wait_time)
+    try:
+        # 1. Inject Fault
+        if not inject_fault_sregym(
+            fault_id,
+            duration=args.duration,
+            tput=args.tput,
+            multiplier=args.multiplier,
+            telemetry_endpoint=args.telemetry_endpoint
+        ):
+            print(f"❌ Skipping {fault_id} due to injection failure.")
+            return False
 
-    print(f"🔍 Fetching pods in namespace: '{namespace}'...")
-    pods = v1.list_namespaced_pod(namespace=namespace)
+        wait_time = 300
+        print(f"⏳ Waiting {wait_time}s for symptoms and logs to accumulate...")
+        await asyncio.sleep(wait_time)
 
-    # 2. Get Prometheus Anomalies
-    profile = BENCHMARK_PROFILE if args.zscore_mode == "benchmark" else PRODUCTION_PROFILE
-    engine = PrometheusAnomalyEngine(prom_url=args.prometheus_url, profile=profile, v1=v1, namespace=namespace)
-    
-    anomalous_pods = []
-    if engine.is_available:
-        anomalous_pods = engine.detect_anomalous_pods()
-        print(f"⚠️  Prometheus detected {len(anomalous_pods)} anomalous pod(s).")
-    else:
-        print("⚠️  Prometheus connection failed internally.")
+        namespace = args.namespace
+        if namespace == "auto":
+            for ns in ["hotel-reservation", "astronomy-shop", "social-network", "blueprint-hotel-reservation"]:
+                try:
+                    if v1.list_namespaced_pod(namespace=ns).items:
+                        namespace = ns
+                        print(f"✅ Auto-detected active namespace for scenario {fault_id}: '{namespace}'")
+                        break
+                except Exception: pass
 
-    # 3. K8s Binary Checks
-    fallback_pods = _binary_k8s_unhealthy_pods(pods)
-    if fallback_pods:
-        print(f"⚠️  Found {len(fallback_pods)} unhealthy pod(s) via binary checks.")
+        print(f"🔍 Fetching pods in namespace: '{namespace}'...")
+        pods = v1.list_namespaced_pod(namespace=namespace)
+    finally:
+        stop_monitor.set()
+        monitor_thread.join(timeout=2)
 
-    if not anomalous_pods and not fallback_pods:
-        print("❌ All pods healthy. SREGym fault didn't trigger any symptoms. Skipping.")
-        return False
-
-    # 4. Extract Logs
+    # 2. Extract Logs from ALL pods (Bypassing Prometheus)
+    print("⚠️ Bypassing Prometheus anomaly detection. Extracting logs for ALL pods in namespace...")
     combined_errors = []
     focal_services = []
-    processed_pods = set()
-
-    if anomalous_pods:
-        anomalous_pods.sort(key=lambda x: x.z_score, reverse=True)
 
     def _get_svc_name(pod_obj, default_name):
         return (
@@ -164,32 +204,20 @@ async def collect_scenario_data(scenario, args, v1):
                     continue
             combined_errors.append(f"ERROR: [Pod {pod_name}] {line}")
 
-    for ap in anomalous_pods:
-        pod_name = ap.pod_name
-        if pod_name in processed_pods: continue
-        processed_pods.add(pod_name)
-        pod_obj = None
-        try:
-            pod_obj = v1.read_namespaced_pod(name=pod_name, namespace=ap.namespace)
-            svc_name = _get_svc_name(pod_obj, pod_name)
-        except Exception:
-            svc_name = ap.service_name
-
-        if svc_name not in focal_services: focal_services.append(svc_name)
-        await _extract_and_append(pod_name, ap.namespace, ap.container, svc_name)
-        if pod_obj: combined_errors.extend(get_pod_errors(pod_obj, v1))
-
-    for pod in fallback_pods:
+    for pod in pods.items:
         pod_name = pod.metadata.name
-        if pod_name in processed_pods: continue
-        processed_pods.add(pod_name)
         svc_name = _get_svc_name(pod, pod_name)
         if svc_name not in focal_services: focal_services.append(svc_name)
         await _extract_and_append(pod_name, namespace, None, svc_name)
         combined_errors.extend(get_pod_errors(pod, v1))
 
+    if not combined_errors:
+        print("❌ No errors found across any pods in the namespace! Skipping.")
+        return False
+
     full_error_text = "\n".join(combined_errors)
-    focal_service = focal_services[0] if focal_services else "unknown"
+    # Just set focal_service to the fault_id since we know what broke!
+    focal_service = fault_id.split('_')[0]
 
     # 5. Capture Live Topology Snapshot
     print("📸 Capturing live K8s ContextGraph snapshot...")
@@ -230,14 +258,7 @@ async def main():
 
     v1 = pre_flight_checks(args.prometheus_url)
 
-    if args.namespace == "auto":
-        for ns in ["hotel-reservation", "astronomy-shop", "social-network", "blueprint-hotel-reservation"]:
-            try:
-                if v1.list_namespaced_pod(namespace=ns).items:
-                    args.namespace = ns
-                    print(f"✅ Auto-detected active namespace: '{args.namespace}'")
-                    break
-            except Exception: pass
+
 
     with open('sregym_advanced_scenarios.json', 'r') as f:
         scenarios = json.load(f)

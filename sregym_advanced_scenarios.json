@@ -40,5 +40,12 @@
         "description": "RPC module is misconfigured, then a load spike will trigger a retry storm",
         "expected_root_cause": "A massive surge in traffic causes RPC timeouts which amplifies load via aggressive retries, resulting in a retry storm.",
         "expected_mitigation": "Implement Rate Limiting and Load Shedding."
+    },
+    {
+        "fault_id": "capacity_decrease_rpc_retry_storm",
+        "category": "Metastable Failure",
+        "description": "RPC module is misconfigured, then a CPU containment will trigger a retry storm",
+        "expected_root_cause": "CPU starvation triggers RPC timeouts, which amplifies load via aggressive retries, resulting in a retry storm.",
+        "expected_mitigation": "Increase CPU capacity and implement rate limiting."
     }
 ]

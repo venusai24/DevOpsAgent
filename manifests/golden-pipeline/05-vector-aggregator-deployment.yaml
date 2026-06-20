@@ -6,7 +6,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: vector-aggregator
-  namespace: observability
+  namespace: observe
   labels:
     app.kubernetes.io/name: vector-aggregator
     app.kubernetes.io/component: aggregator
@@ -33,7 +33,7 @@ apiVersion: apps/v1
 kind: StatefulSet
 metadata:
   name: vector-aggregator
-  namespace: observability
+  namespace: observe
   labels:
     app.kubernetes.io/name: vector-aggregator
     app.kubernetes.io/component: aggregator
@@ -148,7 +148,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: vector-aggregator-config
-  namespace: observability
+  namespace: observe
   labels:
     app.kubernetes.io/name: vector-aggregator
     app.kubernetes.io/part-of: golden-pipeline
@@ -224,7 +224,7 @@ data:
     [sinks.clickhouse_hot]
     type = "clickhouse"
     inputs = ["route_by_tier.hot"]
-    endpoint = "http://clickhouse.observability.svc.cluster.local:8123"
+    endpoint = "http://clickhouse.observe.svc.cluster.local:8123"
     database = "telemetry"
     table = "logs_hot"
     skip_unknown_fields = true
@@ -245,7 +245,7 @@ data:
     [sinks.clickhouse_warm]
     type = "clickhouse"
     inputs = ["route_by_tier.warm"]
-    endpoint = "http://clickhouse.observability.svc.cluster.local:8123"
+    endpoint = "http://clickhouse.observe.svc.cluster.local:8123"
     database = "telemetry"
     table = "logs_warm"
     skip_unknown_fields = true
@@ -266,7 +266,7 @@ data:
     [sinks.clickhouse_cold]
     type = "clickhouse"
     inputs = ["route_by_tier._unmatched"]
-    endpoint = "http://clickhouse.observability.svc.cluster.local:8123"
+    endpoint = "http://clickhouse.observe.svc.cluster.local:8123"
     database = "telemetry"
     table = "logs_cold"
     skip_unknown_fields = true
@@ -293,7 +293,7 @@ apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
   name: vector-aggregator
-  namespace: observability
+  namespace: observe
   labels:
     app.kubernetes.io/name: vector-aggregator
     app.kubernetes.io/part-of: golden-pipeline

@@ -14,7 +14,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: ttl-reconciler-script
-  namespace: observability
+  namespace: observe
   labels:
     app.kubernetes.io/name: ttl-reconciler
     app.kubernetes.io/part-of: golden-pipeline
@@ -67,7 +67,7 @@ apiVersion: batch/v1
 kind: CronJob
 metadata:
   name: ttl-reconciler
-  namespace: observability
+  namespace: observe
   labels:
     app.kubernetes.io/name: ttl-reconciler
     app.kubernetes.io/part-of: golden-pipeline

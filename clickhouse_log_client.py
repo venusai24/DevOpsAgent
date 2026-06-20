@@ -143,7 +143,7 @@ def _get_ch_config() -> dict:
     return {
         "host": os.getenv(
             "CLICKHOUSE_HOST",
-            "clickhouse.observability.svc.cluster.local",
+            "clickhouse.observe.svc.cluster.local",
         ),
         "port": int(os.getenv("CLICKHOUSE_PORT", "8123")),
         "database": os.getenv("CLICKHOUSE_DB", "telemetry"),

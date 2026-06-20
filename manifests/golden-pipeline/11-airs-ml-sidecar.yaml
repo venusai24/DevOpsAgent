@@ -33,7 +33,7 @@ apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: airs-ml-sidecar
-  namespace: observability
+  namespace: observe
   labels:
     app.kubernetes.io/name: airs-ml-sidecar
     app.kubernetes.io/component: anomaly-detection
@@ -45,7 +45,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: airs-ml-sidecar
-  namespace: observability
+  namespace: observe
   labels:
     app.kubernetes.io/name: airs-ml-sidecar
     app.kubernetes.io/component: anomaly-detection
@@ -153,7 +153,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: airs-ml-sidecar
-  namespace: observability
+  namespace: observe
   labels:
     app.kubernetes.io/name: airs-ml-sidecar
     app.kubernetes.io/component: anomaly-detection
@@ -181,7 +181,7 @@ apiVersion: monitoring.coreos.com/v1
 kind: PodMonitor
 metadata:
   name: airs-ml-sidecar
-  namespace: observability
+  namespace: observe
   labels:
     app.kubernetes.io/name: airs-ml-sidecar
     app.kubernetes.io/part-of: golden-blueprint

@@ -575,6 +575,9 @@ and
 
         Returns a list of V1Pod objects (may be empty if nothing matches).
         """
+        if self._v1 is None:
+            return []
+
         # ── Priority 0: k8s.pod.name label (injected by k8sattributes) ────
         # When the OTel k8sattributes processor is active (10-otel-k8sattributes-patch.yaml)
         # spanmetrics metrics carry k8s.pod.name as a label that resolves directly

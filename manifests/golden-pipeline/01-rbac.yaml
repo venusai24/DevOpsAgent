@@ -8,7 +8,7 @@ apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: vector-edge
-  namespace: observability
+  namespace: observe
   labels:
     app.kubernetes.io/name: vector-edge
     app.kubernetes.io/component: edge-agent
@@ -42,7 +42,7 @@ roleRef:
 subjects:
   - kind: ServiceAccount
     name: vector-edge
-    namespace: observability
+    namespace: observe
 
 ---
 # ── Vector Aggregator RBAC ────────────────────────────────────
@@ -50,7 +50,7 @@ apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: vector-aggregator
-  namespace: observability
+  namespace: observe
   labels:
     app.kubernetes.io/name: vector-aggregator
     app.kubernetes.io/component: aggregator
@@ -62,7 +62,7 @@ apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: otel-k8s-events
-  namespace: observability
+  namespace: observe
   labels:
     app.kubernetes.io/name: otel-k8s-events
     app.kubernetes.io/component: event-collector
@@ -103,7 +103,7 @@ roleRef:
 subjects:
   - kind: ServiceAccount
     name: otel-k8s-events
-    namespace: observability
+    namespace: observe
 
 ---
 # ── AIRS AI Agent RBAC (ConfigMap Patching) ──────────────────
@@ -113,7 +113,7 @@ apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: airs-agent
-  namespace: observability
+  namespace: observe
   labels:
     app.kubernetes.io/name: airs-agent
     app.kubernetes.io/part-of: golden-pipeline
@@ -122,7 +122,7 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   name: airs-configmap-patcher
-  namespace: observability
+  namespace: observe
   labels:
     app.kubernetes.io/name: airs-agent
     app.kubernetes.io/part-of: golden-pipeline
@@ -139,7 +139,7 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   name: airs-configmap-patcher
-  namespace: observability
+  namespace: observe
   labels:
     app.kubernetes.io/name: airs-agent
     app.kubernetes.io/part-of: golden-pipeline
@@ -150,4 +150,4 @@ roleRef:
 subjects:
   - kind: ServiceAccount
     name: airs-agent
-    namespace: observability
+    namespace: observe

@@ -53,7 +53,7 @@ CREATE TABLE IF NOT EXISTS telemetry.logs_hot (
     -- Protects ClickHouse from full-table scans when AI generates
     -- naive SQL like: WHERE Message ILIKE '%exception%'
     INDEX idx_message Message
-        TYPE full_text GRANULARITY 1,
+        TYPE tokenbf_v1(32768, 3, 0) GRANULARITY 1,
 
     -- Bloom filter on ServiceName for fast service-scoped queries
     INDEX idx_service ServiceName
@@ -67,10 +67,7 @@ CREATE TABLE IF NOT EXISTS telemetry.logs_hot (
     INDEX idx_source Source
         TYPE bloom_filter(0.01) GRANULARITY 1
 
-) ENGINE = ReplicatedMergeTree(
-    '/clickhouse/tables/{shard}/telemetry_logs_hot',
-    '{replica}'
-)
+) ENGINE = MergeTree()
 PARTITION BY toYYYYMMDD(Timestamp)
 ORDER BY (Namespace, ServiceName, PodName, Timestamp)
 TTL toDateTime(Timestamp) + INTERVAL 7 DAY DELETE
@@ -102,14 +99,11 @@ CREATE TABLE IF NOT EXISTS telemetry.logs_warm (
     RescueReason    LowCardinality(String)   CODEC(ZSTD(3)),
     Labels          Map(String, String)      CODEC(ZSTD(3)),
 
-    INDEX idx_message Message TYPE full_text GRANULARITY 1,
+    INDEX idx_message Message TYPE tokenbf_v1(32768, 3, 0) GRANULARITY 1,
     INDEX idx_service ServiceName TYPE bloom_filter(0.01) GRANULARITY 1,
     INDEX idx_severity Severity TYPE set(10) GRANULARITY 4
 
-) ENGINE = ReplicatedMergeTree(
-    '/clickhouse/tables/{shard}/telemetry_logs_warm',
-    '{replica}'
-)
+) ENGINE = MergeTree()
 PARTITION BY toYYYYMMDD(Timestamp)
 ORDER BY (Namespace, ServiceName, PodName, Timestamp)
 TTL toDateTime(Timestamp) + INTERVAL 30 DAY DELETE
@@ -143,13 +137,10 @@ CREATE TABLE IF NOT EXISTS telemetry.logs_cold (
     Labels          Map(String, String)      CODEC(ZSTD(5)),
 
     -- Minimal indexing on cold tier to reduce storage overhead
-    INDEX idx_message Message TYPE full_text GRANULARITY 4,
+    INDEX idx_message Message TYPE tokenbf_v1(32768, 3, 0) GRANULARITY 4,
     INDEX idx_service ServiceName TYPE bloom_filter(0.01) GRANULARITY 4
 
-) ENGINE = ReplicatedMergeTree(
-    '/clickhouse/tables/{shard}/telemetry_logs_cold',
-    '{replica}'
-)
+) ENGINE = MergeTree()
 PARTITION BY toYYYYMM(Timestamp)  -- Monthly partitions for cold data
 ORDER BY (Namespace, ServiceName, PodName, Timestamp)
 TTL toDateTime(Timestamp) + INTERVAL 90 DAY DELETE
@@ -175,14 +166,11 @@ CREATE TABLE IF NOT EXISTS telemetry.k8s_events (
     ReportingController LowCardinality(String) CODEC(ZSTD(1)),
     Count           UInt32                   DEFAULT 1,
 
-    INDEX idx_message Message TYPE full_text GRANULARITY 1,
+    INDEX idx_message Message TYPE tokenbf_v1(32768, 3, 0) GRANULARITY 1,
     INDEX idx_reason Reason TYPE set(50) GRANULARITY 1,
     INDEX idx_object_kind ObjectKind TYPE set(20) GRANULARITY 1
 
-) ENGINE = ReplicatedMergeTree(
-    '/clickhouse/tables/{shard}/telemetry_k8s_events',
-    '{replica}'
-)
+) ENGINE = MergeTree()
 PARTITION BY toYYYYMMDD(Timestamp)
 ORDER BY (Namespace, ObjectKind, ObjectName, Timestamp)
 TTL toDateTime(Timestamp) + INTERVAL 30 DAY DELETE
@@ -213,8 +201,7 @@ SETTINGS
     max_execution_time = 10,
     max_rows_to_read = 100000000,
     max_memory_usage = 2147483648,
-    max_result_rows = 10000
-TO USER airs_agent;
+    max_result_rows = 10000;
 
 -- Create the AIRS agent user (replace password in production)
 CREATE USER IF NOT EXISTS airs_agent

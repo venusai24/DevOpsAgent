@@ -95,7 +95,7 @@ class Settings(BaseSettings):
     # ── Golden Blueprint: ClickHouse Log Backend ──────────────────────────────
     # When the Golden Blueprint pipeline is deployed, set these to point at the
     # ClickHouse cluster. When unset, the system falls back to K8s API polling.
-    CLICKHOUSE_HOST: str = "clickhouse.observability.svc.cluster.local"
+    CLICKHOUSE_HOST: str = "clickhouse.observe.svc.cluster.local"
     CLICKHOUSE_PORT: int = 9000
     CLICKHOUSE_DB: str = "telemetry"
     CLICKHOUSE_USER: str = "airs_agent"
