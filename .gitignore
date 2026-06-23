@@ -1,0 +1,17 @@
+.env
+
+# Ignore all markdown files
+*.md
+
+# Except README.md
+!README.md
+Rules.txt
+Definitive Reliability-First Cognitive Architecture for Incident Response.md:Zone.Identifier
+
+# Python cache files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+OperationalStateMachine&ToolTaxonomy. Formal Operational State MachineThe e
+reliability_first_cognitive_architecture.md:Zone.Identifier

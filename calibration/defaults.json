@@ -1,0 +1,84 @@
+{
+  "_comment": "Default calibration thresholds for Phase 1. These are hardcoded conservative defaults. Replace with output from scripts/calibrate.py in Phase 3.",
+
+  "conann": {
+    "default_alpha": 0.10,
+    "collections": {
+      "diagnostic_knowledge": {
+        "alpha": 0.10,
+        "max_expansions": 5,
+        "initial_probes": 10,
+        "typical_k": 4,
+        "q_hat": 0.50
+      },
+      "tool_selection": {
+        "alpha": 0.10,
+        "max_expansions": 3,
+        "initial_probes": 8,
+        "typical_k": 2,
+        "q_hat": 0.45
+      },
+      "query_templates": {
+        "alpha": 0.05,
+        "max_expansions": 3,
+        "initial_probes": 8,
+        "typical_k": 1,
+        "q_hat": 0.40
+      },
+      "remediation_actions": {
+        "alpha": 0.10,
+        "max_expansions": 5,
+        "initial_probes": 10,
+        "typical_k": 2,
+        "q_hat": 0.50
+      },
+      "failure_signatures": {
+        "alpha": 0.15,
+        "max_expansions": 5,
+        "initial_probes": 10,
+        "typical_k": 3,
+        "q_hat": 0.55
+      },
+      "operational_constraints": {
+        "alpha": 0.05,
+        "max_expansions": 3,
+        "initial_probes": 8,
+        "typical_k": 2,
+        "q_hat": 0.40
+      }
+    }
+  },
+
+  "risk": {
+    "nonconformity_weights": {
+      "w1_li_score": 0.40,
+      "w2_bert_f1": 0.60
+    },
+    "bert_score": {
+      "model_type": "microsoft/deberta-xlarge-mnli",
+      "lang": "en",
+      "low_quality_threshold": 0.30
+    },
+    "trajectory": {
+      "sigmoid_scale": 10.0,
+      "noisy_or_clamp_max": 0.999
+    }
+  },
+
+  "context": {
+    "scorer_weights": {
+      "relevance": 0.30,
+      "recency": 0.15,
+      "causal_importance": 0.25,
+      "uniqueness": 0.15,
+      "diagnostic_value": 0.15
+    },
+    "recency_decay_lambda": 0.0002,
+    "eviction_score_threshold": 0.30,
+    "eviction_pressure_threshold": 0.85
+  },
+
+  "_version": "phase1-defaults",
+  "_calibrated": false,
+  "_calibration_date": null
+}
