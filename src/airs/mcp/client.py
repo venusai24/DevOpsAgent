@@ -211,3 +211,49 @@ class MCPToolClient:
     @staticmethod
     def _digest(text: str) -> str:
         return hashlib.sha256(text.encode()).hexdigest()
+
+    async def discover_tools(self, timeout: float = 10.0) -> dict[str, list[dict]]:
+        """
+        Concurrently discover available tools from all configured MCP servers.
+        
+        Returns:
+            dict mapping server_id -> list of raw tool schemas returned by the server.
+        """
+        async def fetch_for_server(server_id: str, uri: str) -> tuple[str, list[dict]]:
+            try:
+                from mcp import ClientSession
+                from mcp.client.sse import sse_client
+                import asyncio
+                
+                async def _fetch():
+                    async with sse_client(uri) as (read, write):
+                        async with ClientSession(read, write) as session:
+                            await session.initialize()
+                            response = await session.list_tools()
+                            return [
+                                {
+                                    "tool_name": tool.name,
+                                    "mcp_server_id": server_id,
+                                    "description": tool.description or "",
+                                    "input_schema": tool.inputSchema,
+                                }
+                                for tool in response.tools
+                            ]
+                
+                tools = await asyncio.wait_for(_fetch(), timeout=timeout)
+                return server_id, tools
+            except Exception as e:
+                log.warning(f"Failed to discover tools for MCP server {server_id}: {e}")
+                return server_id, []
+
+        tasks = [
+            fetch_for_server(server_id, uri)
+            for server_id, uri in self._server_uris.items()
+            if uri  # Skip unconfigured mock servers
+        ]
+        
+        if not tasks:
+            return {}
+            
+        results = await asyncio.gather(*tasks)
+        return {server_id: tools for server_id, tools in results}

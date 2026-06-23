@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 from airs.models.evidence import EvidenceCandidate, EntityType, SignalSource
-from airs.models.intents import ExecutionIntent, SignalType
+from airs.models.intents import ToolSpec, SignalType
 from airs.signal_adapters.base import (
     FilteredSignalPayload,
     RawSignalPayload,
@@ -38,13 +38,10 @@ class MetricsSignalAdapter(SignalAdapter):
 
     async def execute(
         self,
-        intent: ExecutionIntent,
+        tool_spec: ToolSpec,
         mcp_client: Any,
     ) -> RawSignalPayload:
-        if intent.tool_spec is None:
-            raise ValueError("MetricsSignalAdapter requires a tool_spec in the intent")
-
-        spec = intent.tool_spec
+        spec = tool_spec
         response = await mcp_client.invoke(
             server_id=spec.mcp_server_id,
             tool_name=spec.tool_name,

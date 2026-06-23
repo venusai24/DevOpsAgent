@@ -9,7 +9,7 @@ import logging
 from typing import Any, Optional
 
 from airs.models.evidence import EvidenceCandidate, EntityType, SignalSource
-from airs.models.intents import ExecutionIntent, SignalType
+from airs.models.intents import ToolSpec, SignalType
 from airs.signal_adapters.base import (
     FilteredSignalPayload,
     RawSignalPayload,
@@ -30,11 +30,8 @@ class LogsSignalAdapter(SignalAdapter):
     def signal_type(self) -> SignalType:
         return SignalType.LOGS
 
-    async def execute(self, intent: ExecutionIntent, mcp_client: Any) -> RawSignalPayload:
-        if intent.tool_spec is None:
-            raise ValueError("LogsSignalAdapter requires a tool_spec")
-
-        spec = intent.tool_spec
+    async def execute(self, tool_spec: ToolSpec, mcp_client: Any) -> RawSignalPayload:
+        spec = tool_spec
         response = await mcp_client.invoke(
             server_id=spec.mcp_server_id,
             tool_name=spec.tool_name,

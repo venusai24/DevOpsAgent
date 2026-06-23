@@ -172,56 +172,66 @@ class InvestigationWorkflow:
                 continue
 
             elif action == IntentAction.EXECUTE_TOOL:
-                if intent.tool_spec is None:
-                    workflow.logger.error("EXECUTE_TOOL intent missing tool_spec at hop %d", hop)
+                if not intent.tool_specs:
+                    workflow.logger.error("EXECUTE_TOOL intent missing tool_specs at hop %d", hop)
                     continue
 
-                # ── Execute MCP tool ──────────────────────────────────────────
-                candidate = await workflow.execute_activity(
-                    execute_mcp_tool,
-                    args=[
-                        alert_id,
-                        hop,
-                        intent,
-                        service,
-                        namespace,
-                    ],
-                    start_to_close_timeout=_TOOL_ACTIVITY_TIMEOUT,
-                    retry_policy=_ACTIVITY_RETRY,
-                )
-
-                # ── Admit evidence to context ─────────────────────────────────
-                self._state, _metrics = await workflow.execute_activity(
-                    admit_evidence_candidate,
-                    args=[self._state, candidate],
-                    start_to_close_timeout=_SHORT_ACTIVITY_TIMEOUT,
-                    retry_policy=_ACTIVITY_RETRY,
-                )
-
-                # ── Epistemic verification ────────────────────────────────────
-                # Note: logprobs are not available from all LLMs; use [] as fallback
-                self._state, pasc_ok = await workflow.execute_activity(
-                    verify_epistemic_state,
-                    args=[
-                        self._state,
-                        [],  # logprobs — populated by LLM response in Phase 2
-                        "",  # llm_interpretation — from previous reasoning output
-                        str(candidate.filtered_content),
-                        intent.tool_spec.tier.value,
-                    ],
-                    start_to_close_timeout=_SHORT_ACTIVITY_TIMEOUT,
-                    retry_policy=_ACTIVITY_RETRY,
-                )
-
-                # Increment hop counter
-                self._state = self._state.increment_hop()
-
-                if not pasc_ok:
-                    workflow.logger.warning(
-                        "PASC coverage violation at hop %d — aborting tool chain",
-                        hop,
+                # ── Execute MCP tools concurrently ────────────────────────────
+                import asyncio
+                futures = [
+                    workflow.execute_activity(
+                        execute_mcp_tool,
+                        args=[
+                            alert_id,
+                            hop,
+                            spec,
+                            service,
+                            namespace,
+                        ],
+                        start_to_close_timeout=_TOOL_ACTIVITY_TIMEOUT,
+                        retry_policy=_ACTIVITY_RETRY,
                     )
-                    # PASC violation: skip to next reasoning hop (don't execute more tools)
+                    for spec in intent.tool_specs
+                ]
+                candidates = await asyncio.gather(*futures)
+
+                # ── Admit evidence to context & verify sequentially ───────────
+                pasc_violation = False
+                for i, candidate in enumerate(candidates):
+                    spec = intent.tool_specs[i]
+
+                    self._state, _metrics = await workflow.execute_activity(
+                        admit_evidence_candidate,
+                        args=[self._state, candidate],
+                        start_to_close_timeout=_SHORT_ACTIVITY_TIMEOUT,
+                        retry_policy=_ACTIVITY_RETRY,
+                    )
+
+                    # ── Epistemic verification ────────────────────────────────
+                    # Note: logprobs are not available from all LLMs; use [] as fallback
+                    self._state, pasc_ok = await workflow.execute_activity(
+                        verify_epistemic_state,
+                        args=[
+                            self._state,
+                            [],  # logprobs — populated by LLM response in Phase 2
+                            "",  # llm_interpretation — from previous reasoning output
+                            str(candidate.filtered_content),
+                            spec.tier.value,
+                        ],
+                        start_to_close_timeout=_SHORT_ACTIVITY_TIMEOUT,
+                        retry_policy=_ACTIVITY_RETRY,
+                    )
+
+                    if not pasc_ok:
+                        pasc_violation = True
+                        workflow.logger.warning(
+                            "PASC coverage violation at hop %d for tool %s — aborting tool chain",
+                            hop, spec.tool_name
+                        )
+                        break
+
+                # Increment hop counter once per reasoning cycle
+                self._state = self._state.increment_hop()
 
         # ── Max hops reached without terminal action ──────────────────────────
         workflow.logger.warning(

@@ -47,7 +47,7 @@ from airs.csv_engine.tools import (
     csv_sql_query,
     csv_time_window_summary,
 )
-from airs.models.intents import ExecutionIntent, SignalType
+from airs.models.intents import ToolSpec, SignalType
 from airs.signal_adapters.base import (
     EvidenceCandidate,
     FilteredSignalPayload,
@@ -134,22 +134,21 @@ class CsvSignalAdapter(SignalAdapter):
 
     async def execute(
         self,
-        intent: ExecutionIntent,
+        tool_spec: ToolSpec,
         mcp_client: Any = None,  # Unused — CSV tools are local
     ) -> RawSignalPayload:
         """
         Dispatch to the appropriate CsvEngine tool.
 
         Args:
-            intent: ExecutionIntent with tool_spec.tool_name and
-                    tool_spec.arguments holding the tool parameters.
+            tool_spec: ToolSpec with tool_name and arguments holding the parameters.
             mcp_client: Not used. CSV tools run in-process.
 
         Returns:
             RawSignalPayload wrapping the tool's JSON output.
         """
-        tool_name = intent.tool_spec.tool_name
-        arguments = intent.tool_spec.arguments
+        tool_name = tool_spec.tool_name
+        arguments = tool_spec.arguments
 
         if tool_name not in _TOOL_DISPATCH:
             return _build_error_raw(

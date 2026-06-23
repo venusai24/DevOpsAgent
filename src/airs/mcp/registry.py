@@ -268,8 +268,51 @@ class ToolRegistry:
 
     def __init__(self) -> None:
         self._manifest: list[dict] = _TOOL_MANIFEST
-        # Build name → spec index
+        # Build name -> spec index
         self._by_name: dict[str, dict] = {s["tool_name"]: s for s in self._manifest}
+        self._initialized = False
+
+    async def initialize_async(self, client: Any) -> None:
+        """
+        Concurrently load tools from MCP servers and augment the static manifest.
+        
+        Args:
+            client: MCPToolClient instance used for discovery.
+        """
+        if self._initialized:
+            return
+
+        discovered_tool_map = await client.discover_tools()
+        
+        added_count = 0
+        for server_id, tools in discovered_tool_map.items():
+            for raw_tool in tools:
+                tool_name = raw_tool["tool_name"]
+                if tool_name not in self._by_name:
+                    # Enrich raw tool with default AIRS classifications
+                    from airs.models.intents import ToolTier, SignalType
+                    enriched_tool = {
+                        "tool_name": tool_name,
+                        "mcp_server_id": server_id,
+                        "tier": ToolTier.OBSERVATION, # Default to safe read-only
+                        "signal_type": SignalType.METRICS, # Default generic signal type
+                        "idempotent": True,
+                        "expected_latency_seconds": 10,
+                        "evidence_categories": ["dynamic_discovery"],
+                        "description": raw_tool.get("description", ""),
+                    }
+                    self._manifest.append(enriched_tool)
+                    self._by_name[tool_name] = enriched_tool
+                    
+                    # Update category index dynamically
+                    for cat in enriched_tool["evidence_categories"]:
+                        _CATEGORY_TO_TOOLS.setdefault(cat, []).append(tool_name)
+                    added_count += 1
+                    
+        if added_count > 0:
+            log.info(f"Dynamically discovered and registered {added_count} new tools from MCP servers.")
+            
+        self._initialized = True
 
     def get_tools_for_gap(self, evidence_category: str) -> list[ToolSpec]:
         """

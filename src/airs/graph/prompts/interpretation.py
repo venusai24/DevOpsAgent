@@ -161,7 +161,7 @@ Hop: {hop_index}/{max_hops} ({hops_remaining} hops remaining)
 2. If supermartingale M_t >= {escalation_threshold:.1f} → ESCALATE
 3. If consecutive_low_delta >= 3 → QUERY_PLAYBOOK first, then resume tool execution
 4. If you have enough evidence to confirm root cause → DIAGNOSE
-5. If you need more evidence → EXECUTE_TOOL (select the tool that fills the biggest evidence gap)
+5. If you need more evidence → EXECUTE_TOOL (you may select up to 3 independent tools to execute in parallel)
 
 ## Your Task
 Decide the single best next action. Respond ONLY with valid JSON matching this schema:
@@ -169,15 +169,17 @@ Decide the single best next action. Respond ONLY with valid JSON matching this s
   "action": "EXECUTE_TOOL" | "QUERY_PLAYBOOK" | "DIAGNOSE" | "ESCALATE",
   "reasoning": "<2-3 sentence justification referencing specific evidence node IDs>",
   "missing_mass_at_decision": {missing_mass:.3f},
-  "tool_spec": {{
-    "tool_name": "<tool name>",
-    "mcp_server_id": "<server id>",
-    "arguments": {{}},
-    "tier": 1,
-    "signal_type": "METRICS" | "LOGS" | "TRACES" | "K8S_STATE",
-    "idempotent": true,
-    "expected_latency_seconds": 10
-  }},
+  "tool_specs": [
+    {{
+      "tool_name": "<tool name>",
+      "mcp_server_id": "<server id>",
+      "arguments": {{}},
+      "tier": 1,
+      "signal_type": "METRICS" | "LOGS" | "TRACES" | "K8S_STATE",
+      "idempotent": true,
+      "expected_latency_seconds": 10
+    }}
+  ],
   "playbook_query": {{
     "collection": "<collection name>",
     "query_text": "<natural language query>",
@@ -185,7 +187,7 @@ Decide the single best next action. Respond ONLY with valid JSON matching this s
     "k": 3
   }}
 }}
-Note: Include tool_spec only if action=EXECUTE_TOOL; include playbook_query only if action=QUERY_PLAYBOOK."""
+Note: Include tool_specs only if action=EXECUTE_TOOL; include playbook_query only if action=QUERY_PLAYBOOK."""
 
 
 def build_diagnosis_prompt(

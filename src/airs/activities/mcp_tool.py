@@ -20,7 +20,7 @@ from temporalio import activity
 from airs.mcp.client import MCPToolClient
 from airs.mcp.idempotency import IdempotencyManager, create_idempotency_manager
 from airs.models.evidence import EvidenceCandidate
-from airs.models.intents import ExecutionIntent, SignalType
+from airs.models.intents import ToolSpec, SignalType
 from airs.signal_adapters import get_adapter
 
 log = logging.getLogger(__name__)
@@ -30,7 +30,7 @@ log = logging.getLogger(__name__)
 async def execute_mcp_tool(
     investigation_id: str,
     hop_index: int,
-    intent: ExecutionIntent,
+    tool_spec: ToolSpec,
     incident_service: str,
     incident_namespace: str,
 ) -> EvidenceCandidate:
@@ -40,28 +40,22 @@ async def execute_mcp_tool(
     Steps:
     1. Check idempotency cache — return cached if hit
     2. Select SignalAdapter for the intent's signal_type
-    3. execute(): translate intent → MCP call → RawSignalPayload
+    3. execute(): translate intent -> MCP call -> RawSignalPayload
     4. pre_filter(): deterministic noise reduction (no LLM)
-    5. normalize(): RawSignal → EvidenceCandidate
+    5. normalize(): RawSignal -> EvidenceCandidate
     6. Cache result in Redis
 
     Args:
         investigation_id: For idempotency key namespacing.
         hop_index:        Current investigation hop.
-        intent:           ExecutionIntent(action=EXECUTE_TOOL) with tool_spec.
+        tool_spec:        The specific tool to execute.
         incident_service: Affected service for pre-filter scope.
         incident_namespace: Kubernetes namespace for K8s pre-filters.
 
     Returns:
         EvidenceCandidate — pre-filtered, normalized, ready for context admission.
-
-    Raises:
-        ValueError: If intent has no tool_spec.
     """
-    if intent.tool_spec is None:
-        raise ValueError("execute_mcp_tool called with intent missing tool_spec")
-
-    spec = intent.tool_spec
+    spec = tool_spec
 
     activity.logger.info(
         "Executing MCP tool: %s/%s (hop=%d, idempotent=%s)",
@@ -93,7 +87,7 @@ async def execute_mcp_tool(
 
     # ── Execute MCP call ──────────────────────────────────────────────────────
     mcp_client = MCPToolClient.from_settings()
-    raw_payload = await adapter.execute(intent, mcp_client)
+    raw_payload = await adapter.execute(tool_spec, mcp_client)
 
     # Attach idempotency metadata
     raw_payload.idempotency_key = idem_key

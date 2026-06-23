@@ -93,21 +93,21 @@ class ExecutionIntent(BaseModel):
     The single output of the LangGraph reasoning engine per hop.
 
     action:        What the agent intends to do next.
-    tool_spec:     Set when action == EXECUTE_TOOL.
+    tool_specs:    List of tools to execute when action == EXECUTE_TOOL (max 3).
     playbook_query: Set when action == QUERY_PLAYBOOK.
     reasoning:     Brief explanation of why this action was chosen.
     missing_mass_at_decision: M_t value that led to this decision.
     """
     action: IntentAction
-    tool_spec: Optional[ToolSpec] = None
+    tool_specs: list[ToolSpec] = Field(default_factory=list, max_length=3)
     playbook_query: Optional[PlaybookQuery] = None
     reasoning: str = ""
     missing_mass_at_decision: float = Field(default=1.0, ge=0.0, le=1.0)
 
     @model_validator(mode="after")
     def validate_action_payload(self) -> "ExecutionIntent":
-        if self.action == IntentAction.EXECUTE_TOOL and self.tool_spec is None:
-            raise ValueError("tool_spec must be set when action == EXECUTE_TOOL")
+        if self.action == IntentAction.EXECUTE_TOOL and not self.tool_specs:
+            raise ValueError("tool_specs must contain at least one tool when action == EXECUTE_TOOL")
         if self.action == IntentAction.QUERY_PLAYBOOK and self.playbook_query is None:
             raise ValueError(
                 "playbook_query must be set when action == QUERY_PLAYBOOK"

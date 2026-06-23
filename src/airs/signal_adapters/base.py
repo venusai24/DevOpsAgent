@@ -21,7 +21,7 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 from airs.models.evidence import EvidenceCandidate, EntityType, SignalSource
-from airs.models.intents import ExecutionIntent, SignalType
+from airs.models.intents import ToolSpec, SignalType
 
 
 @dataclass
@@ -76,11 +76,11 @@ class SignalAdapter(ABC):
     @abstractmethod
     async def execute(
         self,
-        intent: ExecutionIntent,
+        tool_spec: ToolSpec,
         mcp_client: Any,  # MCPToolClient (avoid circular import)
     ) -> RawSignalPayload:
         """
-        Translate ExecutionIntent → MCP tool call(s) → RawSignalPayload.
+        Translate ToolSpec → MCP tool call(s) → RawSignalPayload.
         May make multiple MCP calls and aggregate results.
         """
         ...

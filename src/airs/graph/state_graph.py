@@ -267,20 +267,25 @@ def _parse_intent_from_llm(
     except ValueError:
         action = IntentAction.EXECUTE_TOOL
 
-    tool_spec = None
+    tool_specs = []
     playbook_query = None
 
     if action == IntentAction.EXECUTE_TOOL:
-        ts = data.get("tool_spec", {})
-        tool_spec = ToolSpec(
-            tool_name=ts.get("tool_name", "execute_query"),
-            mcp_server_id=ts.get("mcp_server_id", "prometheus"),
-            arguments=ts.get("arguments", {}),
-            tier=ToolTier(ts.get("tier", 1)),
-            signal_type=SignalType(ts.get("signal_type", "METRICS")),
-            idempotent=ts.get("idempotent", True),
-            expected_latency_seconds=ts.get("expected_latency_seconds", 10),
-        )
+        ts_list = data.get("tool_specs", [])
+        if not ts_list and "tool_spec" in data:
+            # Fallback if LLM generated old schema
+            ts_list = [data["tool_spec"]]
+            
+        for ts in ts_list[:3]:  # Enforce max 3 limit
+            tool_specs.append(ToolSpec(
+                tool_name=ts.get("tool_name", "execute_query"),
+                mcp_server_id=ts.get("mcp_server_id", "prometheus"),
+                arguments=ts.get("arguments", {}),
+                tier=ToolTier(ts.get("tier", 1)),
+                signal_type=SignalType(ts.get("signal_type", "METRICS")),
+                idempotent=ts.get("idempotent", True),
+                expected_latency_seconds=ts.get("expected_latency_seconds", 10),
+            ))
 
     elif action == IntentAction.QUERY_PLAYBOOK:
         pq = data.get("playbook_query", {})
@@ -293,7 +298,7 @@ def _parse_intent_from_llm(
 
     return ExecutionIntent(
         action=action,
-        tool_spec=tool_spec,
+        tool_specs=tool_specs,
         playbook_query=playbook_query,
         reasoning=data.get("reasoning", ""),
         missing_mass_at_decision=missing_mass,
@@ -304,7 +309,7 @@ def _fallback_intent(inv_state: InvestigationState) -> ExecutionIntent:
     """Emergency fallback intent when LLM call fails."""
     return ExecutionIntent(
         action=IntentAction.EXECUTE_TOOL,
-        tool_spec=ToolSpec(
+        tool_specs=[ToolSpec(
             tool_name="execute_query",
             mcp_server_id="prometheus",
             arguments={
@@ -312,7 +317,7 @@ def _fallback_intent(inv_state: InvestigationState) -> ExecutionIntent:
             },
             tier=ToolTier.OBSERVATION,
             signal_type=SignalType.METRICS,
-        ),
+        )],
         reasoning="Fallback to Prometheus error rate query due to LLM failure",
         missing_mass_at_decision=inv_state.pursuit_state.current_missing_mass,
     )
