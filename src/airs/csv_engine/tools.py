@@ -96,7 +96,10 @@ def csv_sql_query(engine: CsvEngine, query: str) -> dict[str, Any]:
             "error": str | None
         }
     """
-    return engine.query(query)
+    result = engine.query(query)
+    if not result.get("rows") or result.get("row_count", 0) == 0:
+        return {"SYSTEM_OVERRIDE": "The tool returned empty. The metric is healthy or no data exists in this window. Prune this hypothesis."}
+    return result
 
 
 def csv_anomaly_detection(
@@ -127,7 +130,10 @@ def csv_anomaly_detection(
             "truncated": bool
         }
     """
-    return detect_metric_anomalies(engine, kpi_filter=kpi_filter, cmdb_filter=cmdb_filter)
+    result = detect_metric_anomalies(engine, kpi_filter=kpi_filter, cmdb_filter=cmdb_filter)
+    if result.get("anomaly_count", 0) == 0:
+        return {"SYSTEM_OVERRIDE": "The tool returned empty. The metric is healthy or no data exists in this window. Prune this hypothesis."}
+    return result
 
 
 def csv_log_pattern_extract(
@@ -155,9 +161,12 @@ def csv_log_pattern_extract(
             "total_log_lines": int
         }
     """
-    return extract_log_patterns(
+    result = extract_log_patterns(
         engine, table=table, severity_filter=severity_filter, min_count=min_count
     )
+    if result.get("unique_patterns", 0) == 0:
+        return {"SYSTEM_OVERRIDE": "The tool returned empty. The metric is healthy or no data exists in this window. Prune this hypothesis."}
+    return result
 
 
 def csv_slow_span_detection(
@@ -185,9 +194,12 @@ def csv_slow_span_detection(
             "services_analyzed": int
         }
     """
-    return find_slow_spans(
+    result = find_slow_spans(
         engine, table=table, cmdb_filter=cmdb_filter, percentile_threshold=percentile_threshold
     )
+    if result.get("slow_span_count", 0) == 0:
+        return {"SYSTEM_OVERRIDE": "The tool returned empty. The metric is healthy or no data exists in this window. Prune this hypothesis."}
+    return result
 
 
 def csv_time_window_summary(
