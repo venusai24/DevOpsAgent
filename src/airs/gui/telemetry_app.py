@@ -75,34 +75,34 @@ if st.button("Fetch and Export Data", type="primary"):
                 csv_path = convert_metrics_to_csv(data, OUTPUT_DIR, "prometheus_metrics.csv")
                 if csv_path: generated_files.append(csv_path)
 
-            # Fetch Logs (Loki & OpenSearch combined)
-            logs_data = []
+            # Fetch Logs
             if use_loki:
                 st.write("Fetching Loki logs...")
                 client = get_client("loki", urls['loki'])
-                logs_data.extend(client.fetch(start_dt, end_dt))
+                data = client.fetch(start_dt, end_dt)
+                csv_path = convert_logs_to_csv(data, OUTPUT_DIR, "loki_incident_logs.csv")
+                if csv_path: generated_files.append(csv_path)
+                
             if use_opensearch:
                 st.write("Fetching OpenSearch logs...")
                 client = get_client("opensearch", urls['opensearch'])
-                logs_data.extend(client.fetch(start_dt, end_dt))
-                
-            if logs_data:
-                csv_path = convert_logs_to_csv(logs_data, OUTPUT_DIR, "cluster_incident_logs.csv")
+                data = client.fetch(start_dt, end_dt)
+                csv_path = convert_logs_to_csv(data, OUTPUT_DIR, "opensearch_incident_logs.csv")
                 if csv_path: generated_files.append(csv_path)
                 
-            # Fetch Traces (Jaeger & Tempo combined)
-            traces_data = []
+            # Fetch Traces
             if use_jaeger:
                 st.write("Fetching Jaeger traces...")
                 client = get_client("jaeger", urls['jaeger'])
-                traces_data.extend(client.fetch(start_dt, end_dt))
+                data = client.fetch(start_dt, end_dt)
+                csv_path = convert_traces_to_csv(data, OUTPUT_DIR, "jaeger_incident_traces.csv")
+                if csv_path: generated_files.append(csv_path)
+                
             if use_tempo:
                 st.write("Fetching Tempo traces...")
                 client = get_client("tempo", urls['tempo'])
-                traces_data.extend(client.fetch(start_dt, end_dt))
-                
-            if traces_data:
-                csv_path = convert_traces_to_csv(traces_data, OUTPUT_DIR, "incident_traces.csv")
+                data = client.fetch(start_dt, end_dt)
+                csv_path = convert_traces_to_csv(data, OUTPUT_DIR, "tempo_incident_traces.csv")
                 if csv_path: generated_files.append(csv_path)
 
             if generated_files:
