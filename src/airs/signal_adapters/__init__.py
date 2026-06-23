@@ -4,6 +4,7 @@ from airs.signal_adapters.base import (
     RawSignalPayload,
     SignalAdapter,
 )
+from airs.signal_adapters.csv_adapter import CsvSignalAdapter
 from airs.signal_adapters.logs import LogsSignalAdapter
 from airs.signal_adapters.metrics import MetricsSignalAdapter
 from airs.signal_adapters.prefilters import (
@@ -23,6 +24,8 @@ def get_adapter(signal_type: SignalType) -> SignalAdapter:
         SignalType.LOGS: LogsSignalAdapter,
         SignalType.TRACES: TracesSignalAdapter,
         SignalType.K8S_STATE: K8sStateSignalAdapter,
+        # CSV adapter: uses env-var data directory, shared across tools
+        SignalType.CSV: CsvSignalAdapter,
     }
     adapter_cls = _registry.get(signal_type)
     if adapter_cls is None:
@@ -38,6 +41,7 @@ __all__ = [
     "LogsSignalAdapter",
     "TracesSignalAdapter",
     "K8sStateSignalAdapter",
+    "CsvSignalAdapter",
     "zscore_filter",
     "dedup_log_patterns",
     "filter_error_spans",

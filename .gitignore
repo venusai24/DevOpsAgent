@@ -15,3 +15,7 @@ __pycache__/
 *.pyd
 OperationalStateMachine&ToolTaxonomy. Formal Operational State MachineThe e
 reliability_first_cognitive_architecture.md:Zone.Identifier
+mysql02_corpus_case/mysql02_metrics.csv
+.gitignore
+mysql02_corpus_case/incident_traces.csv
+mysql02_corpus_case/cluster_incident_logs.csv

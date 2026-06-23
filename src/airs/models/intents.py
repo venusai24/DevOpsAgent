@@ -30,6 +30,9 @@ class SignalType(str, Enum):
     TRACES = "TRACES"
     K8S_STATE = "K8S_STATE"
     CODE = "CODE"
+    # Local CSV telemetry files exported by the GUI module.
+    # Processed through the DuckDB CSV Intelligence Layer.
+    CSV = "CSV"
 
 
 class ToolTier(int, Enum):

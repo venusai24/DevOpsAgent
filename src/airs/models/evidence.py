@@ -47,6 +47,9 @@ class SignalSource(str, Enum):
     K8S_STATE = "K8S_STATE"
     CODE = "CODE"
     ALERT = "ALERT"
+    # DuckDB-processed CSV telemetry files exported by the GUI module.
+    CSV = "CSV"
+
 
 
 # ─── Sub-models ───────────────────────────────────────────────────────────────
