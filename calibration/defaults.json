@@ -55,7 +55,7 @@
       "w2_bert_f1": 0.60
     },
     "bert_score": {
-      "model_type": "microsoft/deberta-xlarge-mnli",
+      "model_type": "distilbert-base-uncased",
       "lang": "en",
       "low_quality_threshold": 0.30
     },

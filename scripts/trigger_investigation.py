@@ -22,11 +22,10 @@ from pathlib import Path
 ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
-import structlog
-from temporalio.client import Client
-
-from airs.config import settings
-from airs.workflows.investigation_workflow import InvestigationWorkflow
+import structlog  # noqa: E402
+from airs.config import settings  # noqa: E402
+from airs.workflows.investigation_workflow import InvestigationWorkflow  # noqa: E402
+from temporalio.client import Client  # noqa: E402
 
 log = structlog.get_logger()
 
@@ -41,7 +40,7 @@ async def trigger(
     wait: bool = False,
 ) -> None:
     """Connect to Temporal and start an InvestigationWorkflow."""
-    client = await Client.connect(settings.temporal_host)
+    client = await Client.connect(settings.temporal_address)
 
     log.info(
         "Triggering investigation workflow",
@@ -78,14 +77,14 @@ async def trigger(
         workflow_id=handle.id,
         run_id=handle.result_run_id,
     )
-    print(f"\n✅ Investigation started!")
+    print("\n✅ Investigation started!")
     print(f"   Workflow ID: {handle.id}")
     print(f"   Monitor at:  http://localhost:8233/namespaces/default/workflows/{handle.id}")
 
     if wait:
         log.info("Waiting for workflow result...")
         result = await handle.result()
-        print(f"\n📋 Investigation Result:")
+        print("\n📋 Investigation Result:")
         print(json.dumps(result.model_dump(mode="json"), indent=2))
 
 

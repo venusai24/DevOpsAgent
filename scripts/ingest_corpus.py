@@ -30,17 +30,14 @@ from pathlib import Path
 ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
-import structlog
-from qdrant_client import QdrantClient
-from qdrant_client.models import Distance, VectorParams
-
-from airs.config import settings
-from airs.retrieval.ingestion import (
+import structlog  # noqa: E402
+from airs.config import settings  # noqa: E402
+from airs.retrieval.ingestion import (  # noqa: E402
     Collection,
-    EmbeddingService,
-    IngestionPipeline,
     create_ingestion_pipeline,
 )
+from qdrant_client import QdrantClient  # noqa: E402
+from qdrant_client.models import Distance, VectorParams  # noqa: E402
 
 # ─── Logging ──────────────────────────────────────────────────────────────────
 structlog.configure(
@@ -242,6 +239,103 @@ def main() -> None:
                 log.info("[DRY RUN] Total from Remediation: %d documents", total)
         else:
             log.warning("Remediation corpus not found", path=str(remediation_dir))
+
+    # ── Step 2.5: Corpus/Tools → C2 ──────────────────────────────────────────
+    if not args.skip_markdown and (
+        args.collection is None
+        or args.collection == Collection.TOOL_SELECTION.value
+    ):
+        tools_dir = ROOT / "Corpus" / "Tools"
+        if tools_dir.exists():
+            log.info("Ingesting Tools corpus", directory=str(tools_dir))
+            if not args.dry_run:
+                counts = pipeline.ingest_markdown_directory(
+                    directory=tools_dir,
+                    collection=Collection.TOOL_SELECTION.value,
+                    knowledge_type="PROCEDURAL",
+                    verbose=args.verbose,
+                )
+                for k, v in counts.items():
+                    total_counts[k] = total_counts.get(k, 0) + v
+            else:
+                from airs.retrieval.ingestion import MarkdownDecomposer
+                decomposer = MarkdownDecomposer()
+                total = 0
+                for md_file in sorted(tools_dir.glob("*.md")):
+                    docs = decomposer.decompose(
+                        md_file,
+                        Collection.TOOL_SELECTION.value,
+                        "PROCEDURAL",
+                    )
+                    total += len(docs)
+                log.info("[DRY RUN] Total from Tools: %d documents", total)
+        else:
+            log.warning("Tools corpus not found", path=str(tools_dir))
+
+    # ── Step 2.6: Corpus/Constraints → C6 ────────────────────────────────────
+    if not args.skip_markdown and (
+        args.collection is None
+        or args.collection == Collection.OPERATIONAL_CONSTRAINTS.value
+    ):
+        constraints_dir = ROOT / "Corpus" / "Constraints"
+        if constraints_dir.exists():
+            log.info("Ingesting Constraints corpus", directory=str(constraints_dir))
+            if not args.dry_run:
+                counts = pipeline.ingest_markdown_directory(
+                    directory=constraints_dir,
+                    collection=Collection.OPERATIONAL_CONSTRAINTS.value,
+                    knowledge_type="CONSTRAINTS",
+                    verbose=args.verbose,
+                )
+                for k, v in counts.items():
+                    total_counts[k] = total_counts.get(k, 0) + v
+            else:
+                from airs.retrieval.ingestion import MarkdownDecomposer
+                decomposer = MarkdownDecomposer()
+                total = 0
+                for md_file in sorted(constraints_dir.glob("*.md")):
+                    docs = decomposer.decompose(
+                        md_file,
+                        Collection.OPERATIONAL_CONSTRAINTS.value,
+                        "CONSTRAINTS",
+                    )
+                    total += len(docs)
+                log.info("[DRY RUN] Total from Constraints Corpus: %d documents", total)
+        else:
+            log.warning("Constraints corpus not found", path=str(constraints_dir))
+
+    # ── Step 2.7: Corpus/Signatures → C5 ─────────────────────────────────────
+    if not args.skip_markdown and (
+        args.collection is None
+        or args.collection == Collection.FAILURE_SIGNATURES.value
+    ):
+        signatures_dir = ROOT / "Corpus" / "Signatures"
+        if signatures_dir.exists():
+            log.info("Ingesting Signatures corpus", directory=str(signatures_dir))
+            if not args.dry_run:
+                counts = pipeline.ingest_markdown_directory(
+                    directory=signatures_dir,
+                    collection=Collection.FAILURE_SIGNATURES.value,
+                    knowledge_type="HEURISTIC",
+                    verbose=args.verbose,
+                )
+                for k, v in counts.items():
+                    total_counts[k] = total_counts.get(k, 0) + v
+            else:
+                from airs.retrieval.ingestion import MarkdownDecomposer
+                decomposer = MarkdownDecomposer()
+                total = 0
+                for md_file in sorted(signatures_dir.glob("*.md")):
+                    docs = decomposer.decompose(
+                        md_file,
+                        Collection.FAILURE_SIGNATURES.value,
+                        "HEURISTIC",
+                    )
+                    total += len(docs)
+                log.info("[DRY RUN] Total from Signatures Corpus: %d documents", total)
+        else:
+            log.warning("Signatures corpus not found", path=str(signatures_dir))
+
 
     # ── Step 3: knowledge/**/*.yaml → respective collections ─────────────────
     if not args.skip_yaml:

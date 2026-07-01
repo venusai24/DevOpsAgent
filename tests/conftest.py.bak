@@ -1,0 +1,226 @@
+"""
+pytest conftest — Module 1.12.
+
+Shared fixtures for all test suites (unit + integration).
+Provides mock MCP clients, synthetic investigation states, and
+test-mode CalibrationStore instances.
+"""
+
+from __future__ import annotations
+
+import json
+import uuid
+from datetime import UTC, datetime
+from typing import Any
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+from airs.models.context import ContextBudget, InsightTiers
+from airs.models.hypothesis import Hypothesis, HypothesisStatus
+from airs.models.investigation import (
+    AlertPayload,
+    InvestigationGraph,
+    InvestigationState,
+)
+from airs.models.pursuit import InformationPursuitState
+from airs.models.risk import TrajectoryRiskState
+
+# ─── Shared fixtures ──────────────────────────────────────────────────────────
+
+
+@pytest.fixture
+def sample_alert() -> AlertPayload:
+    """Standard test alert for payment-service high error rate."""
+    return AlertPayload(
+        alert_id="test-alert-001",
+        alert_name="HighErrorRate",
+        description="HTTP 5xx error rate for payment-service exceeded 5% for 5 minutes",
+        service="payment-service",
+        namespace="production",
+        severity="critical",
+        labels={"service": "payment-service"},
+        annotations={"source": "prometheus"},
+        fired_at=datetime.now(UTC),
+        source="prometheus",
+    )
+
+
+@pytest.fixture
+def sample_hypothesis(sample_alert) -> Hypothesis:
+    """Initial hypothesis seeded from alert."""
+    return Hypothesis(
+        hypothesis_id=str(uuid.uuid4()),
+        statement=(
+            "Service 'payment-service' is experiencing a 'HighErrorRate' "
+            "condition in namespace 'production'."
+        ),
+        confidence=0.10,
+        status=HypothesisStatus.ACTIVE,
+        supporting_node_ids=[],
+        contradicting_node_ids=[],
+        created_at_hop=0,
+        last_updated_hop=0,
+    )
+
+
+@pytest.fixture
+def initial_investigation_state(sample_alert, sample_hypothesis) -> InvestigationState:
+    """Clean initial InvestigationState for test investigations."""
+    return InvestigationState(
+        investigation_id="test-alert-001",
+        workflow_run_id="test-run-001",
+        alert=sample_alert,
+        hypotheses=[sample_hypothesis],
+        leading_hypothesis_id=sample_hypothesis.hypothesis_id,
+        graph=InvestigationGraph(nodes={}, edges=[], causal_chain_ids=[]),
+        insight_tiers=InsightTiers(active=[], summarized=[], archived=[], discarded_count=0),
+        context_budget=ContextBudget(),
+        risk_state=TrajectoryRiskState(
+            trajectory_risk_score=0.0,
+            step_risks=[],
+            supermartingale_value=1.0,
+            escalation_threshold=20.0,  # 1/0.05
+            lambda_threshold=0.35,
+            should_escalate=False,
+        ),
+        pursuit_state=InformationPursuitState(
+            current_missing_mass=1.0,
+            previous_missing_mass=1.0,
+            missing_mass_delta=0.0,
+            epsilon_threshold=0.05,
+            consecutive_low_delta=0,
+            filled_evidence_categories=[],
+            open_evidence_categories=[],
+        ),
+        total_hop_count=0,
+        created_at=datetime.now(UTC),
+        last_updated_at=datetime.now(UTC),
+    )
+
+
+@pytest.fixture
+def mock_mcp_client() -> MagicMock:
+    """
+    Mock MCPToolClient that returns synthetic Prometheus data.
+    Suitable for unit tests that test signal adapter logic without
+    a real MCP server.
+    """
+    from airs.mcp.client import MCPToolResponse
+
+    client = MagicMock()
+    client.invoke = AsyncMock(
+        return_value=MCPToolResponse(
+            success=True,
+            content={
+                "data": {
+                    "result": [
+                        {
+                            "metric": {
+                                "__name__": "http_requests_total",
+                                "service": "payment-service",
+                                "status": "500",
+                            },
+                            "values": [
+                                [1718000000.0, "10"],
+                                [1718000060.0, "12"],
+                                [1718000120.0, "45"],  # Spike
+                                [1718000180.0, "50"],
+                                [1718000240.0, "48"],
+                            ],
+                        }
+                    ]
+                }
+            },
+            raw_text=json.dumps({"data": {"result": []}}),
+            raw_digest="a" * 64,
+            error_code=None,
+            error_message=None,
+            server_id="prometheus",
+            tool_name="execute_range_query",
+            latency_ms=120.0,
+        )
+    )
+    return client
+
+
+@pytest.fixture
+def prometheus_range_query_response() -> dict[str, Any]:
+    """Synthetic Prometheus range query response for metrics tests."""
+    return {
+        "data": {
+            "result": [
+                {
+                    "metric": {
+                        "__name__": "http_request_duration_seconds",
+                        "service": "payment-service",
+                        "quantile": "0.99",
+                    },
+                    "values": [
+                        [1718000000.0, "0.05"],
+                        [1718000060.0, "0.06"],
+                        [1718000120.0, "2.50"],  # Anomalous spike
+                        [1718000180.0, "2.40"],
+                        [1718000240.0, "0.07"],
+                    ],
+                }
+            ]
+        }
+    }
+
+
+@pytest.fixture
+def loki_log_response() -> dict[str, Any]:
+    """Synthetic Loki log response."""
+    return {
+        "data": {
+            "result": [
+                {
+                    "stream": {"service": "payment-service"},
+                    "values": [
+                        ["1718000000000000000", "ERROR: Connection refused to postgres:5432"],
+                        ["1718000010000000000", "ERROR: Connection refused to postgres:5432"],
+                        ["1718000020000000000", "ERROR: Database connection pool exhausted"],
+                        ["1718000030000000000", "WARN: Retry attempt 1/3 for postgres"],
+                        ["1718000040000000000", "ERROR: Connection refused to postgres:5432"],
+                    ],
+                }
+            ]
+        }
+    }
+
+
+@pytest.fixture
+def jaeger_trace_response() -> list[dict[str, Any]]:
+    """Synthetic Jaeger trace response with error spans."""
+    return [
+        {
+            "traceID": "abc123def456",
+            "spanID": "span001",
+            "operationName": "POST /api/payments",
+            "duration": 2500000,  # 2.5s in microseconds
+            "process": {"serviceName": "payment-service"},
+            "tags": [
+                {"key": "error", "value": True},
+                {"key": "http.status_code", "value": 503},
+            ],
+        },
+        {
+            "traceID": "abc123def456",
+            "spanID": "span002",
+            "operationName": "SELECT * FROM orders",
+            "duration": 2400000,
+            "process": {"serviceName": "postgres"},
+            "tags": [
+                {"key": "error", "value": True},
+                {"key": "db.type", "value": "postgresql"},
+            ],
+        },
+        {
+            "traceID": "abc123def456",
+            "spanID": "span003",
+            "operationName": "GET /health",
+            "duration": 5000,
+            "process": {"serviceName": "payment-service"},
+            "tags": [],
+        },
+    ]

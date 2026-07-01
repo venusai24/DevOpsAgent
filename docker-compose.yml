@@ -1,51 +1,21 @@
 services:
-  # ─── Temporal ─────────────────────────────────────────────────────────────
-  temporal:
-    image: temporalio/auto-setup:latest
-    container_name: airs-temporal
-    ports:
-      - "7233:7233"   # Temporal gRPC frontend
-      - "8233:8233"   # Temporal Web UI
+  postgres:
+    image: ankane/pgvector:v0.5.1
+    container_name: airs-postgres
     environment:
-      - DB=sqlite     # Lightweight single-node dev setup
-    healthcheck:
-      test: ["CMD", "tctl", "--address", "temporal:7233", "cluster", "health"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
-      start_period: 30s
-
-  # ─── Qdrant (Vector DB) ───────────────────────────────────────────────────
-  qdrant:
-    image: qdrant/qdrant:latest
-    container_name: airs-qdrant
+      POSTGRES_USER: airs_user
+      POSTGRES_PASSWORD: airs_password
+      POSTGRES_DB: airs_db
     ports:
-      - "6333:6333"   # REST API
-      - "6334:6334"   # gRPC API
+      - "5432:5432"
     volumes:
-      - qdrant_data:/qdrant/storage
+      - postgres_data:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:6333/readyz"]
-      interval: 10s
+      test: ["CMD-SHELL", "pg_isready -U airs_user -d airs_db"]
+      interval: 5s
       timeout: 5s
-      retries: 5
-      start_period: 10s
-
-  # ─── Redis ────────────────────────────────────────────────────────────────
-  redis:
-    image: redis:7-alpine
-    container_name: airs-redis
-    ports:
-      - "6379:6379"
-    volumes:
-      - redis_data:/data
-    command: redis-server --save 60 1 --loglevel warning
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 3s
       retries: 5
 
 volumes:
-  qdrant_data:
-  redis_data:
+  postgres_data:

@@ -4,46 +4,31 @@ build-backend = "hatchling.build"
 
 [project]
 name = "airs"
-version = "0.1.0"
-description = "Reliability-First Cognitive Architecture for Enterprise Incident Response"
-readme = "README.md"
+version = "0.2.0"
+description = "Autonomous SRE Diagnostic Agent"
 requires-python = ">=3.12"
-license = { text = "Proprietary" }
 
 dependencies = [
-    # Orchestration
-    "temporalio>=1.9.0",
-    # Reasoning / Agent
-    "langgraph>=0.4.0",
-    # LLM Client (Groq via LiteLLM)
-    "litellm>=1.60.0",
-    # Vector DB
-    "qdrant-client>=1.13.0",
-    # Hallucination detection
-    "bert-score>=0.3.13",
-    # Serialization & config
-    "pydantic>=2.10.0",
-    "pydantic-settings>=2.7.0",
-    # State store
-    "redis[hiredis]>=5.2.0",
-    # MCP Client
-    "mcp>=1.9.0",
-    # Math / stats
+    "polars>=0.20.0",
+    "duckdb>=1.0.0",
     "numpy>=1.26.0",
     "scipy>=1.13.0",
-    # Logging
-    "structlog>=24.4.0",
-    # YAML parsing
-    "pyyaml>=6.0",
-    # Token counting
-    "tiktoken>=0.9.0",
-    # HTTP (HuggingFace API)
-    "httpx>=0.27.0",
-    # GUI and Data processing
-    "streamlit>=1.35.0",
-    "pandas>=2.2.0",
-    # Analytical SQL engine for large CSV files (too big for Excel)
-    "duckdb>=1.1.0",
+    "ruptures>=1.1.9",
+    "tiktoken>=0.7.0",
+    "langchain-core>=0.2.0",
+    "langgraph>=0.1.0",
+    "langgraph-checkpoint-postgres>=0.1.0",
+    "chromadb>=0.5.0",
+    "pydantic>=2.7.0",
+    "fastapi>=0.111.0",
+    "uvicorn>=0.30.0",
+    "asyncpg>=0.29.0",
+    "psycopg>=3.1.19",
+    "psycopg-pool>=3.2.2",
+    "structlog>=24.1.0",
+    "litellm>=1.35.0",
+    "huggingface-hub>=0.23.0",
+    "langsmith>=0.1.0"
 ]
 
 [project.optional-dependencies]
@@ -56,14 +41,21 @@ dev = [
 ]
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/airs"]
+packages = [
+    "src/csv_engine",
+    "src/taip",
+    "src/dsem",
+    "src/diagnosis",
+    "src/hitl",
+    "src/orchestrator",
+    "src/models",
+    "src/config"
+]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
 python_files = ["test_*.py"]
-python_classes = ["Test*"]
-python_functions = ["test_*"]
 
 [tool.ruff]
 line-length = 100
@@ -77,3 +69,4 @@ ignore = ["E501"]
 python_version = "3.12"
 strict = true
 ignore_missing_imports = true
+explicit_package_bases = true
