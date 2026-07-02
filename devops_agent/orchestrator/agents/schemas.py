@@ -20,6 +20,7 @@ class TriageAgentOutput(BaseModel):
     incident_state: Literal["ongoing", "resolved"] = "ongoing"
     concurrent_incident_clusters: list[list[str]] = Field(default_factory=list)
     boundary_ambiguous_components: list[str] = Field(default_factory=list)
+    dependency_graph: dict[str, Any] = Field(default_factory=dict)
     investigation_state: Literal["active", "AMBIGUOUS_PRE_EVIDENCE", "AMBIGUOUS", "INCONCLUSIVE", "complete"] = "active"
     current_node: str = "triage"
 

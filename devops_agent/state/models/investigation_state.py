@@ -41,6 +41,7 @@ class ExplicitSymptoms(BaseState):
     description: str = ""
     alert_timestamp: datetime | None = None
     raw_alert_payload: dict[str, Any] = field(default_factory=dict)
+    dependencies_unknown: bool = False
 
 
 @dataclass(frozen=True)

@@ -145,6 +145,17 @@ async def context_assembler_agent_node(state: InvestigationState, config: Runnab
             
         # Integrate Negative Space Concept
         declared_graph = state.get("declared_topology_graph", {})
+        
+        explicit_symptoms = state.get("explicit_symptoms", {})
+        if isinstance(explicit_symptoms, dict):
+            dependencies_unknown = explicit_symptoms.get("dependencies_unknown", False)
+        else:
+            dependencies_unknown = getattr(explicit_symptoms, "dependencies_unknown", False)
+
+        if dependencies_unknown:
+            # Drop declared edges, keeping only nodes for isolated investigation
+            declared_graph = {node: [] for node in declared_graph.keys()}
+
         all_declared_components = set(declared_graph.keys())
         active_components = set(cmdb_ids) | set(tc_values) | set(log_cmdb_ids) | set(trace_cmdb_ids)
         healthy_components = list(all_declared_components - active_components)
@@ -197,8 +208,10 @@ async def triage_agent_node(state: InvestigationState, config: RunnableConfig) -
     t3 = registry.get("triage_query_logs")
     t4 = registry.get("triage_query_traces")
     t5 = registry.get("run_connected_component_analysis")
+    t6 = registry.get("extract_trace_dependency_edges")
+    t7 = registry.get("infer_metric_dependency_edges")
     
-    tools = wrap_tools([t1, t2, t3, t4, t5], executor, ctx)
+    tools = wrap_tools([t1, t2, t3, t4, t5, t6, t7], executor, ctx)
     llm = LLMFactory.get_llm("triage").bind_tools(tools + [SubmitTriageReport])
     
     triage_system_prompt = """ROLE
@@ -216,7 +229,8 @@ CONSTRAINTS & RULES
 --------
 1. NO HALLUCINATION: Never assume a column exists if it is not explicitly listed in the schema for that specific source.
 2. NO GUESSING: If a requested analysis requires columns that do not exist, use a different tool or source.
-3. When finished, you MUST call SubmitTriageReport."""
+3. DEPENDENCY GRAPH: If dependencies are unknown, you MUST build the dependency graph using extract_trace_dependency_edges or infer_metric_dependency_edges BEFORE calling run_connected_component_analysis, and pass the constructed graph into it.
+4. When finished, you MUST call SubmitTriageReport."""
     
     messages = [
         SystemMessage(content=triage_system_prompt),
@@ -300,8 +314,7 @@ async def rca_agent_node(state: InvestigationState, config: RunnableConfig) -> d
     tool_names = [
         "query_anomalous_traces", "build_span_tree_summary", 
         "query_metrics_for_hypothesis", "query_logs_for_hypothesis", 
-        "extract_trace_dependency_edges", "run_propagation_direction_check", 
-        "infer_metric_dependency_edges", "query_app_stats_detailed",
+        "run_propagation_direction_check", "query_app_stats_detailed",
         "compute_metric_latency_correlation"
     ]
     

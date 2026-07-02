@@ -21,7 +21,8 @@ class TriageAgent:
                 "component_registry": state.get("component_registry", {}),
                 "tc_to_operation_map": state.get("tc_to_operation_map", {}),
                 "stack_kpi_map": state.get("stack_kpi_map", []),
-                "baseline_registry_ref": state.get("baseline_registry_ref", "")
+                "baseline_registry_ref": state.get("baseline_registry_ref", ""),
+                "declared_topology_graph": state.get("declared_topology_graph", {})
             }
         }
         
@@ -40,6 +41,7 @@ class TriageAgent:
             "investigation_cluster": llm_response.get("investigation_cluster", []),
             "concurrent_incident_clusters": llm_response.get("concurrent_incident_clusters", []),
             "boundary_ambiguous_components": llm_response.get("boundary_ambiguous_components", []),
+            "dependency_graph": llm_response.get("dependency_graph", {}),
             "ranked_hypotheses": llm_response.get("ranked_hypotheses", []),
             "investigation_state": llm_response.get("investigation_state", "active"),
             "current_node": "triage"
