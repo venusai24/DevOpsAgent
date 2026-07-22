@@ -44,7 +44,10 @@ initial_state = InvestigationState(
         "Tomcat04": [], "apache01": [], "apache02": [], "dockerA1": [],
         "dockerA2": [], "dockerB1": [], "dockerB2": []
     },
-    explicit_symptoms={"dependencies_unknown": True}
+    explicit_symptoms={"dependencies_unknown": True},
+    match_results=[],
+    semantic_facts=[],
+    playbook_verdicts=[]
 )
 
 config = {
@@ -58,15 +61,40 @@ print(f"Starting Investigation: {investigation_id}")
 app.clock.start()
 
 async def run_investigation():
+    from langgraph.types import Command
+    from typing import Any
     try:
-        async for event in app.graph.astream(initial_state, config=config):
-            for node_name, state_update in event.items():
-                print(f"✅ Completed Agent Node: {node_name}")
+        command_or_state: Any = initial_state
+        while True:
+            async for event in app.graph.astream(command_or_state, config=config):
+                for node_name, state_update in event.items():
+                    print(f"✅ Completed Agent Node: {node_name}")
+                    
+                    # Print the final report if it was generated
+                    if "final_report" in state_update and state_update["final_report"]:
+                        print("\\n🔥 ROOT CAUSE REPORT 🔥")
+                        print(state_update["final_report"])
+            
+            # Check if execution paused due to an interrupt() or HITL breakpoint
+            state = app.graph.get_state(config)
+            if not state.next:
+                break # Execution finished completely
                 
-                # Print the final report if it was generated
-                if "final_report" in state_update and state_update["final_report"]:
-                    print("\n🔥 ROOT CAUSE REPORT 🔥")
-                    print(state_update["final_report"])
+            print(f"\\n⚠️ Graph Execution Paused at nodes: {state.next}")
+            
+            if "ambiguity_node" in state.next:
+                print("\\n[Ambiguity Detected]: The agent requires human guidance.")
+                hint = input("Enter hint (or type 'manual' for override, 'resume' to ignore): ")
+                if hint.lower() == 'manual':
+                    cause = input("Enter manual root cause override: ")
+                    command_or_state = Command(resume={"action": "manual_root_cause", "root_cause": cause})
+                elif hint.lower() == 'resume':
+                    command_or_state = Command(resume={"action": "ignore"})
+                else:
+                    command_or_state = Command(resume={"action": "hint", "hint": hint})
+            else:
+                user_input = input("Press Enter to resume execution... ")
+                command_or_state = Command(resume=user_input if user_input else "resume")
                     
     except Exception as e:
         print(f"Investigation Failed: {e}")

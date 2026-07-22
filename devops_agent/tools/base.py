@@ -5,7 +5,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
 from datetime import UTC
-from typing import Any, Generic, TypeVar
+from typing import Any, TypeVar
 
 from pydantic import BaseModel, ValidationError
 
@@ -15,7 +15,7 @@ from .models import ToolContext, ToolMetadata, ToolResult, ToolSchema, ToolStatu
 I = TypeVar("I", bound=BaseModel)
 O = TypeVar("O", bound=BaseModel)
 
-class BaseTool(ABC, Generic[I, O]):
+class BaseTool[I: BaseModel, O: BaseModel](ABC):
     """Abstract base class for all Agentic RCA tools."""
 
     @property

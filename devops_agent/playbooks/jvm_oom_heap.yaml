@@ -1,0 +1,23 @@
+scenario_id: "jvm_oom_heap"
+display_name: "Memory Exhaustion / OOM"
+kpi_categories: ["jvm", "memory", "tomcat_session"]
+difficulty_tier: "easy"
+causal_patterns:
+  - "Memory leak"
+  - "Unbounded cache growth"
+  - "Excessive session accumulation"
+  - "Large payload processing"
+diagnostic_checklist:
+  - "Check metric heap.used monotonically increasing over time despite GC activity."
+  - "Check metric GC frequency and GC pause duration increasing."
+  - "Check GC recovery decreasing (heap doesn't return to prior low-water mark)."
+  - "Look for 'java.lang.OutOfMemoryError' or 'GC overhead limit exceeded' in logs."
+  - "Check for sudden drop to near-zero sr/rr when OOM occurs."
+differentiators:
+  - "In pure GC pressure, heap oscillates and recovers. In OOM, heap doesn't drop back to baseline and GC recovery curve shrinks."
+  - "Phase 1: periodic mrt spikes. Phase 2: Trace abandonment (spans start but never complete)."
+disconfirming_signals:
+  - "If heap.used is stable and oscillates with full recovery after GC, this is NOT memory exhaustion."
+evidence_requirements:
+  - "Evidence of heap reaching heap.max and failing to recover."
+  - "Out of Memory errors in logs or JVM crash events."

@@ -1,0 +1,40 @@
+scenario_id: "high_cpu"
+display_name: "CPU Saturation"
+kpi_categories: ["cpu", "process", "tomcat_thread"]
+difficulty_tier: "easy"
+causal_patterns:
+  - "Hot code path"
+  - "Infinite loop"
+  - "Insufficient compute capacity"
+  - "Thread scheduler overhead"
+diagnostic_checklist:
+  - "Check metric cpu.usage > 90% sustained."
+  - "Check metric load_average_1m > cpu_count sustained."
+  - "Check metric context_switch_rate for high values."
+  - "Check metric thread_active for elevated values."
+  - "Check if heap and GC are normal (to rule out GC-driven CPU spikes)."
+differentiators:
+  - "Unlike GC pressure (periodic spikes), CPU saturation shows uniformly elevated but stable duration on every span."
+  - "GC produces distinct metric anomalies (gc.pause.duration, gc.frequency). CPU saturation does not."
+disconfirming_signals:
+  - "If GC pause duration or frequency is heavily elevated, this is likely memory-driven slowness, NOT primary CPU saturation."
+  - "If heap.used is monotonically increasing."
+evidence_requirements:
+  - "Sustained high CPU usage across metrics."
+  - "Corresponding increase in mean response time (mrt) without periodic drops."
+evaluation_rules:
+  - rule_id: "cpu_sustained_high"
+    rule_type: "metric_threshold"
+    parameters:
+      kpi_name: "cpu.usage"
+      condition: ">"
+      threshold: 90.0
+      sustained_minutes: 5
+    semantic_statement_pass: "[PASSED] CPU usage was sustained over 90%."
+    semantic_statement_fail: "[FAILED] CPU usage did not sustain over 90%."
+  - rule_id: "load_average_high"
+    rule_type: "custom_query"
+    parameters:
+      sql: "SELECT max(value) > 4 as is_true FROM read_csv_auto('{metrics_path}') WHERE kpi_name = 'load_average_1m' {time_filter}"
+    semantic_statement_pass: "[PASSED] Load average 1m exceeded CPU count."
+    semantic_statement_fail: "[FAILED] Load average 1m was normal."

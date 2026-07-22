@@ -3,14 +3,14 @@
 import logging
 import time
 from collections.abc import Callable
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 
 from ...config.guardrails_config import CircuitBreakerConfig
 
 logger = logging.getLogger(__name__)
 
-class CircuitBreakerState(str, Enum):
+class CircuitBreakerState(StrEnum):
     CLOSED = "closed"
     OPEN = "open"
     HALF_OPEN = "half_open"

@@ -27,8 +27,8 @@ def duplicate_halt_node(state: InvestigationState) -> dict[str, Any]:
     return {"investigation_state": "complete"}
 
 def deterministic_scoring_node(state: InvestigationState) -> dict[str, Any]:
-    from devops_agent.core.recovery.scoring_engine import DeterministicScorer
     from devops_agent.core.recovery.rca_convergence import RCAConvergenceEvaluator
+    from devops_agent.core.recovery.scoring_engine import DeterministicScorer
     
     scorer = DeterministicScorer()
     

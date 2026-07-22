@@ -1,10 +1,11 @@
 """Evidence Gathering Tools (Tools 4 and 5)."""
 
 
-import pandas as pd
-from pydantic import BaseModel, Field, field_validator
-from langchain_core.tools import ToolException
 from difflib import SequenceMatcher, get_close_matches
+
+import pandas as pd
+from langchain_core.tools import ToolException
+from pydantic import BaseModel, Field, field_validator
 
 from devops_agent.core.db.duckdb_client import DuckDBClient
 from devops_agent.tools.interfaces.validators import parse_timestamp
@@ -154,9 +155,7 @@ class QueryMetricsTool(BaseTool[QueryMetricsInput, QueryMetricsOutput]):
         t_end = inputs.time_window_end
             
         db = DuckDBClient.get_instance()
-        global_max_z = 0.0
         global_trend = "flat"
-        global_summary_parts = []
         
         cmdb_baselines = baseline_data.get(inputs.cmdb_id, {})
         cmdb_baseline = cmdb_baselines[resolved_kpi]

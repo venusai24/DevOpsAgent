@@ -1,6 +1,6 @@
 import asyncio
 import json
-from typing import Any, List
+from typing import Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.runnables import RunnableConfig
@@ -8,17 +8,19 @@ from pydantic import BaseModel, Field
 
 from devops_agent.core.llm_provider import LLMFactory
 from devops_agent.orchestrator.state import InvestigationState
+
 from ..agents.critic_agent import CriticAgent
 from ..agents.schemas import CriticVerdict
 
+
 class SubmitCriticVerdicts(BaseModel):
     """Submit the verdicts for the mismatched evidence items."""
-    verdicts: List[CriticVerdict] = Field(default_factory=list)
+    verdicts: list[CriticVerdict] = Field(default_factory=list)
 
 async def critic_agent_node(state: InvestigationState, config: RunnableConfig) -> dict[str, Any]:
     agent = CriticAgent()
     
-    mismatched_ids = state.get("mismatched_items", [])
+    state.get("mismatched_items", [])
     
     # We only want to review evidence items that are in mismatched_ids
     # But wait, where do we get the actual evidence items from?

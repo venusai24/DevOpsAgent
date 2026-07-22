@@ -1,0 +1,18 @@
+scenario_id: "cascading_failure"
+display_name: "Cascading Failure"
+kpi_categories: []
+difficulty_tier: "hard"
+causal_patterns:
+  - "Component failure causes resource exhaustion in dependents, which cascade to their dependents."
+diagnostic_checklist:
+  - "Check if tc values degrade in temporal waves, starting closest to root component."
+  - "Check if error types progress chronologically (e.g. DB deadlock -> timeout -> thread pool full)."
+  - "Check traces to see failure propagation path."
+  - "Check if anomalies appear sequentially ordered by dependency depth."
+differentiators:
+  - "Identified by clear temporal ordering of anomaly onsets following dependency graph."
+disconfirming_signals:
+  - "If all components fail exactly simultaneously without a propagation delay, it's a global issue (like network or shared infra), not a cascade."
+evidence_requirements:
+  - "Temporal sequence of metric anomalies mapping to the dependency graph."
+  - "Each component's failure mechanism is resource exhaustion from a failing dependency."

@@ -1,9 +1,9 @@
 """Stage-level outcome enumeration."""
 
-from enum import Enum
+from enum import StrEnum
 
 
-class StageOutcome(str, Enum):
+class StageOutcome(StrEnum):
     """High-level result of a single stage execution."""
 
     SUCCESS = "success"

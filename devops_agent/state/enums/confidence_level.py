@@ -1,9 +1,9 @@
 """Root-cause confidence level enumeration (ADR-001 §Stage 7)."""
 
-from enum import Enum
+from enum import StrEnum
 
 
-class ConfidenceLevel(str, Enum):
+class ConfidenceLevel(StrEnum):
     """The four tiers of investigation confidence assigned at Stage 7.
 
     HIGH requires all four evidence sources to agree and no forced exits.

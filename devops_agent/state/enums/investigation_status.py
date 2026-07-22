@@ -4,10 +4,10 @@ Mirrors the investigation_status PostgreSQL ENUM defined in
 StateManagement&PersistenceLayer.md §3.1.2.
 """
 
-from enum import Enum
+from enum import StrEnum
 
 
-class InvestigationStatus(str, Enum):
+class InvestigationStatus(StrEnum):
     """Every status that an investigation_registry row can carry.
 
     Terminal statuses: RESOLVED, SUPERSEDED, DUPLICATE_HALTED.

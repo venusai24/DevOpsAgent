@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Any, Generic, TypeVar
+from typing import Any, TypeVar
 
 T = TypeVar("T")
 
 
-class BaseSerializer(ABC, Generic[T]):
+class BaseSerializer[T](ABC):
     """Contract for all state serializers.
 
     - ``serialise`` converts a state model to a JSON-safe dict.

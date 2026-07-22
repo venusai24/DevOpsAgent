@@ -1,0 +1,22 @@
+scenario_id: "db_query_slowness"
+display_name: "Database Query Slowness / Lock Contention"
+kpi_categories: ["database", "mysql", "tomcat_request"]
+difficulty_tier: "medium"
+causal_patterns:
+  - "Missing index"
+  - "Suboptimal query plan"
+  - "Large table scan"
+  - "Deadlock or long-held transaction locks"
+diagnostic_checklist:
+  - "Check mrt increase for DB-related tc values while non-DB tc values are unaffected."
+  - "Check for 'Slow query: X ms', 'Lock wait timeout exceeded' or 'Deadlock found' in logs."
+  - "Check trace leaf spans for DB calls showing elevated duration."
+  - "Check DB metrics: query_time increasing, threads_running elevated, innodb_row_lock_waits increasing."
+differentiators:
+  - "DB Connection Pool Exhaustion shows errors BEFORE query execution. Slowness shows long queries successfully executing."
+  - "Connections.active is elevated but NOT at max."
+disconfirming_signals:
+  - "If 'Cannot get a connection' or 'Timeout waiting for idle object' is in logs, this is Pool Exhaustion, NOT query slowness."
+evidence_requirements:
+  - "Slow query logs or lock timeout errors."
+  - "Elevated query time metrics or trace spans indicating DB bottleneck."

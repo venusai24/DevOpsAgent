@@ -1,0 +1,23 @@
+scenario_id: "network_degradation"
+display_name: "Network Degradation"
+kpi_categories: ["network"]
+difficulty_tier: "hard"
+causal_patterns:
+  - "NIC failure"
+  - "Switch/router issue"
+  - "Network congestion"
+  - "Firewall rule change"
+  - "MTU mismatch"
+  - "DNS resolution failure"
+diagnostic_checklist:
+  - "Check if mrt increases uniformly across ALL tc values simultaneously, regardless of functional domain."
+  - "Check for connection timeout errors to MULTIPLE different destination hosts in logs."
+  - "Check if trace duration inflation appears at span transitions (inter-service) rather than within single service computation."
+  - "Check network.rx/tx drops or errors on multiple cmdb_ids simultaneously."
+differentiators:
+  - "Selectivity-less degradation: no single service dependency is targeted, everything is slow."
+disconfirming_signals:
+  - "If degradation is selective to only services using a specific DB or cache, it is NOT general network degradation."
+evidence_requirements:
+  - "Simultaneous network metric anomalies across multiple components."
+  - "Logs showing connection failures to varied destinations."

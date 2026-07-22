@@ -6,6 +6,45 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 
+class EvaluationRule(BaseModel):
+    rule_id: str
+    rule_type: Literal["metric_threshold", "log_pattern", "trace_duration", "custom_query"]
+    parameters: dict[str, Any]
+    semantic_statement_pass: str
+    semantic_statement_fail: str
+
+class SemanticFact(BaseModel):
+    rule_id: str
+    is_true: bool
+    observed_value: Any | None
+    semantic_statement: str
+
+class Playbook(BaseModel):
+    scenario_id: str
+    display_name: str
+    kpi_categories: list[str]
+    difficulty_tier: Literal["easy", "medium", "hard"]
+    causal_patterns: list[str]
+    diagnostic_checklist: list[str]
+    differentiators: list[str]
+    disconfirming_signals: list[str]
+    evidence_requirements: list[str]
+    evaluation_rules: list[EvaluationRule] = Field(default_factory=list)
+
+class MatchResult(BaseModel):
+    scenario_id: str
+    fired: bool
+    signal_strength: float
+    matched_components: list[str] = Field(default_factory=list)
+    trigger_signals: dict[str, Any] = Field(default_factory=dict)
+
+class PlaybookVerdict(BaseModel):
+    scenario_id: str
+    status: Literal["confirmed", "refuted", "inconclusive"]
+    rationale: str
+    cited_evidence: list[str] = Field(default_factory=list)
+
+
 class TriageAgentOutput(BaseModel):
     blast_radius: Literal["localized", "selective", "broad", "systemic"]
     blast_radius_qualifier: Literal["simultaneous", "sequential"]
@@ -36,6 +75,12 @@ class SubmitEvidenceReport(BaseModel):
     primary_hypothesis_id: str | None = None
     narrative_summary: str = ""
     is_ready_to_conclude: bool = False
+    
+    confidence: Literal["HIGH", "MEDIUM", "LOW", "INCONCLUSIVE"] | None = None
+    supporting_evidence: list[str] = Field(default_factory=list)
+    contradicting_evidence: list[str] = Field(default_factory=list)
+    unresolved_questions: list[str] = Field(default_factory=list)
+    alternative_hypotheses: list[str] = Field(default_factory=list)
     
     eliminated_hypotheses: list[dict[str, Any]] = Field(default_factory=list)
     surviving_hypotheses: list[str] = Field(default_factory=list)

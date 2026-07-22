@@ -1,21 +1,23 @@
 import json
-import uuid
-from typing import Any, Annotated, TypedDict
 import operator
+import uuid
+from typing import Annotated, Any
 
-from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage, AnyMessage
+from langchain_core.messages import AnyMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, StateGraph
 
 from devops_agent.core.llm_provider import LLMFactory
+from devops_agent.playbooks.registry import PLAYBOOK_REGISTRY
 from devops_agent.tools.executor import ToolExecutor
 from devops_agent.tools.langchain_adapter import wrap_tools
 from devops_agent.tools.models import ToolContext
 from devops_agent.tools.registry import get_registry
 
-from ..state import InvestigationState
-from ..agents.triage_agent import TriageAgent
 from ..agents.schemas import TriageAgentOutput
+from ..agents.triage_agent import TriageAgent
+from ..state import InvestigationState
+
 
 class SubmitTriageReport(TriageAgentOutput):
     """Submit the final investigation brief and triage findings. Call this ONLY when you have finished using the other tools to investigate the data."""
@@ -33,9 +35,44 @@ async def triage_llm_node(state: TriageState, config: RunnableConfig) -> dict[st
     messages = state.get("triage_messages", [])
     if not messages:
         bundle = agent.construct_prompt_bundle(state)
-        triage_system_prompt = """ROLE
+        
+        # Inject confirmed playbooks
+        confirmed_verdicts = [v for v in state.get("playbook_verdicts", []) if v.status == "confirmed"]
+        injected_playbooks = [PLAYBOOK_REGISTRY[v.scenario_id] for v in confirmed_verdicts if v.scenario_id in PLAYBOOK_REGISTRY]
+        
+        if injected_playbooks:
+            facts = state.get("semantic_facts", [])
+            facts_str = "\\n".join(f"- {f.semantic_statement}" for f in facts) if facts else "No semantic facts evaluated."
+            
+            knowledge_block = "\\n\\n".join(
+                f"PLAYBOOK: {p.display_name}\\n"
+                f"Causal Patterns: {', '.join(p.causal_patterns)}\\n"
+                f"Checklist: {', '.join(p.diagnostic_checklist)}\\n"
+                f"Differentiators: {', '.join(p.differentiators)}\\n"
+                f"EVALUATED FACTS:\\n{facts_str}"
+                for p in injected_playbooks
+            )
+            instruction = (
+                "Use the following confirmed diagnostic playbooks as your primary reasoning scaffold. "
+                "If multiple playbooks are present, determine which is the root cause and which are downstream "
+                "symptoms using the differentiators provided.\\n\\n" + knowledge_block
+            )
+        else:
+            instruction = (
+                "No known incident pattern matched this telemetry. Do not attempt to force this into a familiar category. "
+                "Reason from first principles over the raw metrics, logs, and traces provided."
+            )
+            
+        # Add human hint if present
+        hint = state.get("human_hint")
+        if hint:
+            instruction += f"\\n\\nHUMAN HINT: {hint}"
+            
+        triage_system_prompt = f"""ROLE
 --------
 You are the Triage Agent. Your task is to investigate and determine the incident blast radius using diagnostic tools.
+
+{instruction}
 
 CONTEXT: DATA SOURCES & SCHEMAS
 --------
@@ -52,7 +89,7 @@ CONSTRAINTS & RULES
 4. When finished, you MUST call SubmitTriageReport."""
         messages = [
             SystemMessage(content=triage_system_prompt),
-            HumanMessage(content=f"Analyze the incident blast radius based on state:\n{json.dumps(bundle, default=str)}")
+            HumanMessage(content=f"Analyze the incident blast radius based on state:\\n{json.dumps(bundle, default=str)}")
         ]
         
     registry = get_registry()
@@ -79,7 +116,27 @@ CONSTRAINTS & RULES
     tools = wrap_tools([t1, t2, t3, t4, t5], executor, ctx)
     llm = LLMFactory.get_llm("triage").bind_tools(tools + [SubmitTriageReport])
     
-    response = await llm.ainvoke(messages, config=config)
+    try:
+        response = await llm.ainvoke(messages, config=config)
+    except Exception as e:
+        from langchain_core.messages import AIMessage
+        response = AIMessage(
+            content=f"Fatal LLM Error: {e}",
+            tool_calls=[{
+                "name": "SubmitTriageReport",
+                "args": {
+                    "blast_radius": "unknown",
+                    "blast_radius_qualifier": "unknown",
+                    "symptom_pattern": f"API Exhausted: {e}",
+                    "affected_component_candidates": [],
+                    "investigation_cluster": [],
+                    "ranked_hypotheses": [],
+                    "investigation_state": "API_ERROR"
+                },
+                "id": "fatal_error_tc"
+            }]
+        )
+        
     return {"triage_messages": [response] if not state.get("triage_messages") else messages + [response]}
 
 async def triage_tools_node(state: TriageState, config: RunnableConfig) -> dict[str, Any]:

@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import uuid
 from abc import ABC, abstractmethod
-from typing import Generic, TypeVar
+from typing import TypeVar
 
 T = TypeVar("T")
 
 
-class AsyncRepository(ABC, Generic[T]):
+class AsyncRepository[T](ABC):
     """Base contract for all async repositories.
 
     - ``get_by_id`` returns None when the entity does not exist (not an error).

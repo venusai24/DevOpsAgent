@@ -22,12 +22,39 @@ class FallbackModelWrapper:
         
     def with_structured_output(self, schema: Any, **kwargs: Any):
         primary_structured = self.primary.with_structured_output(schema, **kwargs)
-        fallback_structured_list = [f.with_structured_output(schema, **kwargs) for f in self.fallbacks]
+        
+        fallback_kwargs = kwargs.copy()
+        # Open-source models on OpenRouter often fail with 400 if strict=True is sent
+        fallback_kwargs["strict"] = False
+        
+        fallback_structured_list = []
+        for f in self.fallbacks:
+            try:
+                if getattr(f, "__class__", None).__name__ == "ChatOpenAI":
+                    fallback_structured_list.append(f.with_structured_output(schema, **fallback_kwargs))
+                else:
+                    fallback_structured_list.append(f.with_structured_output(schema, **kwargs))
+            except Exception:
+                fallback_structured_list.append(f.with_structured_output(schema, **kwargs))
+                
         return primary_structured.with_fallbacks(fallback_structured_list)
         
     def bind_tools(self, tools: list, **kwargs):
         primary_bound = self.primary.bind_tools(tools, **kwargs)
-        fallback_bound_list = [f.bind_tools(tools, **kwargs) for f in self.fallbacks]
+        
+        fallback_kwargs = kwargs.copy()
+        fallback_kwargs["strict"] = False
+        
+        fallback_bound_list = []
+        for f in self.fallbacks:
+            try:
+                if getattr(f, "__class__", None).__name__ == "ChatOpenAI":
+                    fallback_bound_list.append(f.bind_tools(tools, **fallback_kwargs))
+                else:
+                    fallback_bound_list.append(f.bind_tools(tools, **kwargs))
+            except Exception:
+                fallback_bound_list.append(f.bind_tools(tools, **kwargs))
+                
         return FallbackModelWrapper(primary_bound, fallback_bound_list)
 
     def invoke(self, *args, **kwargs):
@@ -40,7 +67,7 @@ class LLMFactory:
     """Factory to instantiate specialized LLMs per agent role."""
     
     @staticmethod
-    def get_llm(role: Literal["triage", "evidence", "reasoning", "report"]) -> BaseChatModel:
+    def get_llm(role: Literal["triage", "evidence", "reasoning", "report", "verifier", "rca"]) -> BaseChatModel:
         """
         Returns a configured Langchain ChatModel based on the agent's role.
         """

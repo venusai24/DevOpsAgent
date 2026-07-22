@@ -1,0 +1,21 @@
+scenario_id: "slow_downstream"
+display_name: "Slow Downstream Dependency"
+kpi_categories: ["tomcat_request", "process"]
+difficulty_tier: "easy"
+causal_patterns:
+  - "External API degradation"
+  - "Cross-datacenter latency spike"
+  - "Downstream service under load"
+  - "Third-party service degradation"
+diagnostic_checklist:
+  - "Check for mrt increases significantly without immediate sr drop (latency-before-errors signature)."
+  - "Check logs for 'Read timeout after X ms' warnings, but no internal errors on downstream."
+  - "Check traces: root span high, essentially all extra time consumed in specific child span pointing to downstream component."
+  - "Check metrics: Calling service has thread_active increasing. Slow downstream service has response_time increasing but cpu/memory healthy."
+differentiators:
+  - "The slowness is localized to a specific downstream call, and that downstream does not show resource exhaustion."
+disconfirming_signals:
+  - "If downstream shows high CPU or OOM, the root cause is resource exhaustion on the downstream, not just a 'slow downstream'."
+evidence_requirements:
+  - "Traces confirming time is spent waiting on a specific external/downstream service."
+  - "Calling service experiencing thread/connection queueing due to the delay."

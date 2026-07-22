@@ -1,0 +1,23 @@
+scenario_id: "gc_pressure"
+display_name: "GC Pressure (Without OOM)"
+kpi_categories: ["jvm", "memory"]
+difficulty_tier: "medium"
+causal_patterns:
+  - "High object allocation rate"
+  - "Insufficiently sized heap"
+  - "Weak reference handling issues"
+  - "Excessive caching without eviction"
+diagnostic_checklist:
+  - "Check for rhythmic mrt spikes at GC pause intervals."
+  - "Check if rr and sr degrade during spikes and recover between them."
+  - "Check metric gc.minor.count and gc.major.count increasing."
+  - "Check if heap.used oscillates but the baseline trends upward."
+differentiators:
+  - "Unlike OOM, heap never quite reaches heap.max and GC DOES reduce heap each time (though less effectively over time)."
+  - "Unlike CPU saturation, traces between GC pauses are normal."
+disconfirming_signals:
+  - "If 'java.lang.OutOfMemoryError' is found, this is OOM, not just pressure."
+  - "If mrt is uniformly elevated without periodicity, this is likely CPU saturation."
+evidence_requirements:
+  - "Periodic spikes in mrt aligning with GC pauses."
+  - "Increasing GC frequency/duration without outright failure."

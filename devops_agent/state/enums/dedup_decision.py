@@ -1,9 +1,9 @@
 """Deduplication decision enumeration (Stage -1 classifier output)."""
 
-from enum import Enum
+from enum import StrEnum
 
 
-class DedupDecision(str, Enum):
+class DedupDecision(StrEnum):
     """Classification of a new investigation relative to existing live rows.
 
     Used in investigation_registry.dedup_decision and

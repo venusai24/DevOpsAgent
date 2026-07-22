@@ -65,7 +65,7 @@ class PostgresCircuitBreakerRepository(CircuitBreakerRepository):
 
     async def upsert(self, state: CircuitBreakerState) -> CircuitBreakerState:
         async with self._db.transaction() as conn:
-            result = await conn.execute(
+            await conn.execute(
                 """
                 INSERT INTO circuit_breaker_state (
                     cb_id, tool_name, status, failure_count, failure_threshold,

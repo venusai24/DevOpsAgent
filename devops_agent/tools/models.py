@@ -5,14 +5,14 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
-from enum import Enum
-from typing import Generic, TypeVar
+from enum import StrEnum
+from typing import TypeVar
 
 from pydantic import BaseModel
 
 T = TypeVar("T")
 
-class ToolPermissions(str, Enum):
+class ToolPermissions(StrEnum):
     READ_ONLY = "read_only"
     WRITE_BASELINE = "write_baseline"
     EXECUTE_EXTERNAL = "execute_external"
@@ -49,12 +49,12 @@ class ToolContext:
     # Dependency-injected clients will be passed separately via DI
 
 @dataclass
-class ToolSchema(Generic[T]):
+class ToolSchema[T]:
     """Wrapper for Pydantic input schemas."""
     input_type: type[BaseModel]
     output_type: type[BaseModel]
 
-class ToolStatus(str, Enum):
+class ToolStatus(StrEnum):
     PENDING = "pending"
     RUNNING = "running"
     SUCCESS = "success"
@@ -63,7 +63,7 @@ class ToolStatus(str, Enum):
     TIMEOUT = "timeout"
 
 @dataclass
-class ToolResult(Generic[T]):
+class ToolResult[T]:
     """Structured output returned from a tool execution."""
     execution_id: uuid.UUID
     status: ToolStatus

@@ -1,0 +1,22 @@
+scenario_id: "redis_failure"
+display_name: "Redis Failure and Degradation"
+kpi_categories: ["redis_memory", "redis_clients", "redis_perf"]
+difficulty_tier: "medium"
+causal_patterns:
+  - "Redis OOM (maxmemory reached)"
+  - "Process crash"
+  - "Network partition to Redis nodes"
+  - "Client connection limit"
+  - "Severe memory fragmentation"
+diagnostic_checklist:
+  - "Check mrt increases for tc values depending on Redis."
+  - "Check for 'Could not connect to Redis', 'Redis BUSY', 'OOM command not allowed' in logs."
+  - "Check traces for elevated span duration specifically at cache-check operations."
+  - "Check redis metrics: used_memory approaching maxmemory, evicted_keys > 0, keyspace_misses increasing."
+differentiators:
+  - "Crash vs Overload: Crash shows connected_clients dropping to 0 then recovering. Overload shows it climbing to maxclients."
+disconfirming_signals:
+  - "If Redis metrics are stable and cache misses are low, Redis is not the root cause."
+evidence_requirements:
+  - "Redis metric anomalies (memory, clients, or fragmentation)."
+  - "Cache connection or OOM errors in logs."

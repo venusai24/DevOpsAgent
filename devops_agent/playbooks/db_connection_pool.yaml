@@ -1,0 +1,22 @@
+scenario_id: "db_connection_pool"
+display_name: "DB Connection Pool Exhaustion"
+kpi_categories: ["database", "tomcat_request"]
+difficulty_tier: "medium"
+causal_patterns:
+  - "Slow queries holding connections"
+  - "Connection leak"
+  - "Undersized pool"
+  - "Cascade from another issue"
+diagnostic_checklist:
+  - "Check for mrt spikes transitioning sharply to timeout errors and sr drop."
+  - "Check application logs for 'Cannot get a connection', 'pool error Timeout waiting for idle object'."
+  - "Check traces for spans stalling or failing at the connection acquisition point."
+  - "Check application metrics for active connections == pool.max, connection wait time increasing."
+differentiators:
+  - "Log message content is key: error occurs before query is executed."
+  - "Often a symptom of DB query slowness downstream, but this playbook specifically identifies the pool exhaustion bottleneck."
+disconfirming_signals:
+  - "If active connections are far below pool.max, this is NOT pool exhaustion."
+evidence_requirements:
+  - "Application-side connection acquisition timeout logs."
+  - "Active connections metric approaching maximum."

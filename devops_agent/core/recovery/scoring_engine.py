@@ -1,9 +1,9 @@
-import json
 import logging
 import math
 import os
+from typing import Any
+
 import yaml
-from typing import Any, Dict, List, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -16,13 +16,13 @@ class DeterministicScorer:
                 "evidence_weights.yaml"
             )
         try:
-            with open(config_path, "r") as f:
+            with open(config_path) as f:
                 self.weights = yaml.safe_load(f)
         except Exception as e:
             logger.error(f"Failed to load evidence weights from {config_path}: {e}")
             self.weights = {}
 
-    def _determine_expected_support_level(self, raw_ref: Dict[str, Any]) -> str:
+    def _determine_expected_support_level(self, raw_ref: dict[str, Any]) -> str:
         """Heuristic to determine if the raw data supports an anomaly."""
         if "max_z_score" in raw_ref:
             z_score = float(raw_ref.get("max_z_score", 0.0))
@@ -38,7 +38,7 @@ class DeterministicScorer:
                 return "normal"
         return "unknown"
 
-    def _is_mismatch(self, llm_support: str, raw_ref: Dict[str, Any]) -> bool:
+    def _is_mismatch(self, llm_support: str, raw_ref: dict[str, Any]) -> bool:
         expected = self._determine_expected_support_level(raw_ref)
         if expected == "unknown":
             return False
@@ -57,11 +57,11 @@ class DeterministicScorer:
 
     def score(
         self,
-        hypotheses: List[str],
-        evidence_items: List[Dict[str, Any]],
-        evidence_log: List[Dict[str, Any]],
-        critic_verdicts: List[Dict[str, Any]] = None
-    ) -> Tuple[Dict[str, float], List[str]]:
+        hypotheses: list[str],
+        evidence_items: list[dict[str, Any]],
+        evidence_log: list[dict[str, Any]],
+        critic_verdicts: list[dict[str, Any]] = None
+    ) -> tuple[dict[str, float], list[str]]:
         
         mismatched_items = []
         hypothesis_log_odds = {h: 0.0 for h in hypotheses}

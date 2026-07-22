@@ -4,22 +4,26 @@ from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, StateGraph
 
 from .nodes.agent_nodes import context_assembler_agent_node
-from .nodes.triage_subgraph import build_triage_subgraph
-from .nodes.rca_subgraph import build_rca_subgraph
+from .nodes.ambiguity_node import ambiguity_node, confidence_gate, route_after_ambiguity
+from .nodes.critic_agent_node import critic_agent_node
+from .nodes.deterministic_matcher import deterministic_matcher_node
 from .nodes.hitl_nodes import (
     hitl_ambiguous_evidence_node,
     hitl_inconclusive_node,
     hitl_pre_evidence_node,
     resume_after_hitl_node,
 )
-from .nodes.critic_agent_node import critic_agent_node
 from .nodes.orchestration_nodes import (
     deduplication_node,
+    deterministic_scoring_node,
     duplicate_halt_node,
     report_delivery_node,
     save_stage0_artifacts_node,
-    deterministic_scoring_node,
 )
+from .nodes.playbook_verifier import resolve_verdicts, route_to_verifiers, verify_playbook_node
+from .nodes.rca_subgraph import build_rca_subgraph
+from .nodes.semantic_evaluator import semantic_evaluator_node
+from .nodes.triage_subgraph import build_triage_subgraph
 from .state import InvestigationState
 
 
@@ -85,6 +89,12 @@ def build_investigation_graph(checkpointer: BaseCheckpointSaver = None):
     builder.add_node("deterministic_scoring", deterministic_scoring_node)
     builder.add_node("critic", critic_agent_node)
     
+    # Redesign new nodes
+    builder.add_node("deterministic_matcher", deterministic_matcher_node)
+    builder.add_node("semantic_evaluator", semantic_evaluator_node)
+    builder.add_node("verify_playbook", verify_playbook_node)
+    builder.add_node("ambiguity_node", ambiguity_node)
+    
     # Entry point
     builder.set_entry_point("deduplication")
     
@@ -96,7 +106,19 @@ def build_investigation_graph(checkpointer: BaseCheckpointSaver = None):
     })
     
     builder.add_edge("context_assembly", "save_stage0_artifacts")
-    builder.add_edge("save_stage0_artifacts", "triage")
+    builder.add_edge("save_stage0_artifacts", "deterministic_matcher")
+    builder.add_edge("deterministic_matcher", "semantic_evaluator")
+    
+    builder.add_conditional_edges("semantic_evaluator", route_to_verifiers, {
+        "verify_playbook": "verify_playbook",
+        "natural_intelligence_triage": "triage"
+    })
+    
+    builder.add_conditional_edges("verify_playbook", resolve_verdicts, {
+        "playbook_triage": "triage",
+        "hybrid_triage": "triage",
+        "natural_intelligence_triage": "triage"
+    })
     
     builder.add_conditional_edges("triage", route_after_triage, {
         "rca": "rca",
@@ -104,7 +126,17 @@ def build_investigation_graph(checkpointer: BaseCheckpointSaver = None):
         "report_delivery": "report_delivery",
     })
     
-    builder.add_edge("rca", "deterministic_scoring")
+    builder.add_conditional_edges("rca", confidence_gate, {
+        "ambiguity_node": "ambiguity_node",
+        "deterministic_scoring": "deterministic_scoring"
+    })
+    
+    builder.add_conditional_edges("ambiguity_node", route_after_ambiguity, {
+        "natural_intelligence_triage": "triage",
+        "deterministic_scoring": "deterministic_scoring",
+        "report_delivery": "report_delivery"
+    })
+    
     builder.add_conditional_edges("deterministic_scoring", route_after_scoring, {
         "critic": "critic",
         "report_delivery": "report_delivery",
@@ -132,6 +164,7 @@ def build_investigation_graph(checkpointer: BaseCheckpointSaver = None):
         interrupt_before=[
             "hitl_pre_evidence",
             "hitl_ambiguous_evidence",
-            "hitl_inconclusive"
+            "hitl_inconclusive",
+            "ambiguity_node"
         ]
     )

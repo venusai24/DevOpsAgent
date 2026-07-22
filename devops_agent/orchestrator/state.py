@@ -1,8 +1,12 @@
 """LangGraph InvestigationState definition based on ADR-002 Section 6."""
 
-from datetime import datetime
-from typing import Any, Literal, TypedDict, Annotated
 import operator
+from datetime import datetime
+from typing import Annotated, Any, Literal, TypedDict
+
+from .agents.schemas import MatchResult, PlaybookVerdict, SemanticFact
+
+
 class ComponentInfo(TypedDict):
     name: str
     role: Literal["gateway", "app_server", "database", "cache", "container"]
@@ -63,6 +67,11 @@ class InvestigationState(TypedDict, total=False):
     baseline_registry_ref: str
     stage_0_gaps: list[dict[str, Any]]
     
+    # ── Stage 0.5: Deterministic Matching & Verification ───────
+    match_results: list[MatchResult]
+    semantic_facts: list[SemanticFact]
+    playbook_verdicts: Annotated[list[PlaybookVerdict], operator.add]
+    
     # ── Stages 1–4: Triage ────────────────────────────────────────────
     blast_radius: Literal["localized", "selective", "broad", "systemic"]
     blast_radius_qualifier: Literal["simultaneous", "sequential"]
@@ -104,6 +113,7 @@ class InvestigationState(TypedDict, total=False):
     hitl_requests: list[dict[str, Any]]
     hitl_responses: list[dict[str, Any]]
     hitl_resume_action: Literal["RESTART_TRIAGE", "RESTART_EVIDENCE", "RESTART_REASONING", "RESTART_CONTEXT", "FORCE_CLOSE"] | None
+    human_hint: str | None
     current_node: str
     error_log: list[dict[str, Any]]
     token_spend: dict[str, int]

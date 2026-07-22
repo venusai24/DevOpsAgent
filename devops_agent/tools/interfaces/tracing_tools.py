@@ -1,12 +1,13 @@
 """Tracing and Dependency Inference Tools (Tools 6, 7, 8)."""
 
 
-import pandas as pd
 from typing import Any
+
+import pandas as pd
 from pydantic import BaseModel, Field, field_validator
-from devops_agent.tools.interfaces.validators import parse_timestamp
 
 from devops_agent.core.db.duckdb_client import DuckDBClient
+from devops_agent.tools.interfaces.validators import parse_timestamp
 
 from ..base import BaseTool
 from ..models import ToolContext, ToolMetadata, ToolSchema

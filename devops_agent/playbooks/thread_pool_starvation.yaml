@@ -1,0 +1,22 @@
+scenario_id: "thread_pool_starvation"
+display_name: "Thread Pool Starvation"
+kpi_categories: ["tomcat_thread", "process"]
+difficulty_tier: "medium"
+causal_patterns:
+  - "Slow downstream dependency holding threads"
+  - "Thread leak"
+  - "Undersized thread pool"
+  - "Synchronous blocking operations"
+diagnostic_checklist:
+  - "Check sequence: mrt up -> cnt down -> rr down."
+  - "Check logs for 'maxThreads is reached' or 'RejectedExecutionException'."
+  - "Check thread dumps for threads WAITING/BLOCKED on same downstream operation."
+  - "Check traces: root span high, most time in one child span (the downstream call)."
+  - "Check tomcat.thread_active == tomcat.thread_max sustained."
+differentiators:
+  - "Always caused by something holding the threads; traces reveal the blocker."
+disconfirming_signals:
+  - "If tomcat.thread_active is well below max, thread pool is not starved."
+evidence_requirements:
+  - "Metric evidence of thread pool at maximum capacity."
+  - "Thread queue depth increasing or rejected connections."

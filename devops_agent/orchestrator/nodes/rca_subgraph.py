@@ -1,9 +1,9 @@
 import json
-import uuid
-from typing import Any, Annotated, TypedDict
 import operator
+import uuid
+from typing import Annotated, Any
 
-from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage, AnyMessage
+from langchain_core.messages import AnyMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, StateGraph
 
@@ -13,9 +13,10 @@ from devops_agent.tools.langchain_adapter import wrap_tools
 from devops_agent.tools.models import ToolContext
 from devops_agent.tools.registry import get_registry
 
-from ..state import InvestigationState
 from ..agents.rca_agent import RCAAgent
 from ..agents.schemas import SubmitEvidenceReport as SubmitEvidenceReportSchema
+from ..state import InvestigationState
+
 
 class SubmitEvidenceReport(SubmitEvidenceReportSchema):
     """Submit the evidence classification report. Call this ONLY when you have isolated the root cause or gathered sufficient evidence."""
@@ -97,7 +98,29 @@ CONSTRAINTS & RULES
     tools = wrap_tools(available_tools, executor, ctx)
     llm = LLMFactory.get_llm("rca").bind_tools(tools + [SubmitEvidenceReport])
     
-    response = await llm.ainvoke(messages, config=config)
+    try:
+        response = await llm.ainvoke(messages, config=config)
+    except Exception as e:
+        from langchain_core.messages import AIMessage
+        response = AIMessage(
+            content=f"Fatal LLM Error: {e}",
+            tool_calls=[{
+                "name": "SubmitEvidenceReport",
+                "args": {
+                    "evidence_items": [],
+                    "is_ready_to_conclude": False,
+                    "eliminated_hypotheses": [],
+                    "surviving_hypotheses": list(state.get("surviving_hypotheses", [])),
+                    "refined_dependency_graph": {},
+                    "undeclared_dependencies": [],
+                    "propagation_verified_pairs": [],
+                    "investigation_state": "API_ERROR",
+                    "investigation_gaps": [{"reason": f"API Error: {e}"}]
+                },
+                "id": "fatal_error_tc"
+            }]
+        )
+        
     return {"rca_messages": [response] if not state.get("rca_messages") else messages + [response]}
 
 async def rca_tools_node(state: RCAState, config: RunnableConfig) -> dict[str, Any]:

@@ -1,12 +1,12 @@
 """LLM and Tool Failure Classification."""
 
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 
 from pydantic import ValidationError
 
 
-class FailureType(str, Enum):
+class FailureType(StrEnum):
     TOOL_ERROR_CORRECTABLE = "tool_error_correctable"
     TOOL_ERROR_UNCORRECTABLE = "tool_error_uncorrectable"
     TOOL_TIMEOUT = "tool_timeout"

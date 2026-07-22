@@ -1,9 +1,9 @@
 """Circuit breaker finite-state-machine states (RecoveryAndGuardrails.md §7.3)."""
 
-from enum import Enum
+from enum import StrEnum
 
 
-class CircuitBreakerStatus(str, Enum):
+class CircuitBreakerStatus(StrEnum):
     """The three states of the per-tool circuit breaker FSM.
 
     Transitions:

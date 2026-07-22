@@ -1,9 +1,9 @@
 """Failure type enumeration used by Domain 1 recovery (RecoveryAndGuardrails.md §4.1)."""
 
-from enum import Enum
+from enum import StrEnum
 
 
-class FailureType(str, Enum):
+class FailureType(StrEnum):
     """All failure classes the FailureClassifier can produce.
 
     Correctable tool failures have a ``hint`` field that closes the retry loop.

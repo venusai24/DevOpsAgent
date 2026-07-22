@@ -41,8 +41,9 @@ class AppContainer:
         self.tool_executor = ToolExecutor(self.tool_registry)
         
         # 6. Orchestration Graph
-        # Checkpointer would be passed here (e.g., MemorySaver or PostgresSaver)
-        self.graph = build_investigation_graph(checkpointer=None)
+        # We must provide a checkpointer for interrupt_before to work.
+        from langgraph.checkpoint.memory import MemorySaver
+        self.graph = build_investigation_graph(checkpointer=MemorySaver())
 
     @classmethod
     def get_instance(cls) -> 'AppContainer':
