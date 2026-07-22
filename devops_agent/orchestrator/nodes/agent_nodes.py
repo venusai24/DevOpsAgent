@@ -59,19 +59,9 @@ async def context_assembler_agent_node(state: InvestigationState, config: Runnab
     baseline_output = await baseline_tool.execute(ctx, baseline_input)
     baseline_ref = baseline_output.baseline_ref
 
-    bundle = {
-        "role": "CONTEXT_ASSEMBLER",
-        "inputs": {
-            "time_range": state.get("time_range"),
-            "computed_baseline_ref": baseline_ref
-        }
-    }
-    
     # Programmatically fetch topology/context data before LLM execution
-    cmdb_ids = []
-    tc_values = []
-    kpi_map = {}
-    
+    cmdb_ids: list[str] = []
+    tc_values: list[str] = []
     try:
         db = DuckDBClient.get_instance()
         
@@ -88,6 +78,23 @@ async def context_assembler_agent_node(state: InvestigationState, config: Runnab
             df_cmdb = db.query(f"SELECT DISTINCT cmdb_id FROM read_csv_auto('{state.get('metrics_path')}') WHERE cmdb_id IS NOT NULL {time_filter}")
             cmdb_ids = df_cmdb['cmdb_id'].tolist()
             
+        if state.get("app_stats_path"):
+            df_tc = db.query(f"SELECT DISTINCT tc FROM read_csv_auto('{state.get('app_stats_path')}') WHERE tc IS NOT NULL {time_filter}")
+            tc_values = df_tc['tc'].tolist()
+            
+        log_cmdb_ids = []
+        if state.get("logs_path"):
+            df_log_cmdb = db.query(f"SELECT DISTINCT cmdb_id FROM read_csv_auto('{state.get('logs_path')}') WHERE cmdb_id IS NOT NULL {time_filter}")
+            log_cmdb_ids = df_log_cmdb['cmdb_id'].tolist()
+            
+        trace_cmdb_ids = []
+        if state.get("traces_path"):
+            df_trace_cmdb = db.query(f"SELECT DISTINCT cmdb_id FROM read_csv_auto('{state.get('traces_path')}') WHERE cmdb_id IS NOT NULL {time_filter_traces}")
+            trace_cmdb_ids = df_trace_cmdb['cmdb_id'].tolist()
+            
+        # --- Restore kpi_map logic for deterministic_matcher ---
+        kpi_map = {}
+        if state.get("metrics_path"):
             KPI_TAXONOMY = {
                 "cpu": ["cpu"],
                 "memory": ["memory", "mem"],
@@ -115,27 +122,19 @@ async def context_assembler_agent_node(state: InvestigationState, config: Runnab
             for cid in cmdb_ids:
                 cid_kpis = df_kpi_all[df_kpi_all['cmdb_id'] == cid]['kpi_name'].tolist()
                 categories = {}
+                raw_kpi_mapping = {}
                 for k in cid_kpis:
                     cat = classify_kpi(k)
                     categories[cat] = categories.get(cat, 0) + 1
+                    if cat not in raw_kpi_mapping:
+                        raw_kpi_mapping[cat] = []
+                    raw_kpi_mapping[cat].append(k)
                     
                 kpi_map[cid] = {
-                    "available_categories": categories
+                    "available_categories": categories,
+                    "raw_kpi_mapping": raw_kpi_mapping
                 }
-                
-        if state.get("app_stats_path"):
-            df_tc = db.query(f"SELECT DISTINCT tc FROM read_csv_auto('{state.get('app_stats_path')}') WHERE tc IS NOT NULL {time_filter}")
-            tc_values = df_tc['tc'].tolist()
-            
-        log_cmdb_ids = []
-        if state.get("logs_path"):
-            df_log_cmdb = db.query(f"SELECT DISTINCT cmdb_id FROM read_csv_auto('{state.get('logs_path')}') WHERE cmdb_id IS NOT NULL {time_filter}")
-            log_cmdb_ids = df_log_cmdb['cmdb_id'].tolist()
-            
-        trace_cmdb_ids = []
-        if state.get("traces_path"):
-            df_trace_cmdb = db.query(f"SELECT DISTINCT cmdb_id FROM read_csv_auto('{state.get('traces_path')}') WHERE cmdb_id IS NOT NULL {time_filter_traces}")
-            trace_cmdb_ids = df_trace_cmdb['cmdb_id'].tolist()
+        # --------------------------------------------------------
             
         # Integrate Negative Space Concept
         declared_graph = state.get("declared_topology_graph", {})
@@ -172,19 +171,21 @@ async def context_assembler_agent_node(state: InvestigationState, config: Runnab
     except Exception as e:
         print(f"Error querying programmatic context: {e}")
             
-    bundle["inputs"]["discovered_cmdb_ids"] = cmdb_ids
-    bundle["inputs"]["discovered_tc_values"] = tc_values
-    bundle["inputs"]["discovered_kpi_map"] = kpi_map
-    if 'healthy_components' in locals():
-        bundle["inputs"]["healthy_components_status"] = f"NORMAL (NO ANOMALY/DATA IN WINDOW): {healthy_components}"
-    
     # Deterministic Service execution
     service = ContextAssemblerService()
     parsed = service.assemble(state, cmdb_ids, tc_values)
     parsed["baseline_registry_ref"] = baseline_ref
     
+    if 'healthy_components' in locals():
+        parsed["healthy_components"] = tuple(healthy_components)
+        
     if dependencies_unknown and 'discovered_topology' in locals():
         parsed["discovered_topology_graph"] = discovered_topology
+        
+    if 'kpi_map' in locals():
+        parsed["discovered_kpi_map"] = kpi_map
+    else:
+        parsed["discovered_kpi_map"] = {}
     
     return parsed
 

@@ -7,6 +7,25 @@ from ..agents.schemas import SemanticFact
 from ..state import InvestigationState
 
 
+def map_generic_kpi_to_raw(generic_name: str, kpi_map: dict) -> list[str]:
+    base_category = generic_name.split('.')[0]
+    if "load" in generic_name:
+        base_category = "cpu"
+        
+    raw_kpis = []
+    for cid, data in kpi_map.items():
+        mapping = data.get("raw_kpi_mapping", {})
+        if base_category in mapping:
+            raw_kpis.extend(mapping[base_category])
+            
+    # Sub-filter based on generic intent
+    if "load" in generic_name.lower():
+        raw_kpis = [k for k in raw_kpis if "load" in k.lower()]
+    elif "usage" in generic_name.lower() or "util" in generic_name.lower():
+        raw_kpis = [k for k in raw_kpis if "util" in k.lower() or "usage" in k.lower() or "cpu" in k.lower()]
+        
+    return list(set(raw_kpis))
+
 def evaluate_metric_threshold(rule, state: InvestigationState, db: DuckDBClient, time_filter: str) -> SemanticFact:
     kpi_name = rule.parameters.get("kpi_name")
     condition = rule.parameters.get("condition", ">")
@@ -18,20 +37,32 @@ def evaluate_metric_threshold(rule, state: InvestigationState, db: DuckDBClient,
     if not metrics_path:
         return SemanticFact(rule_id=rule.rule_id, is_true=False, observed_value=None, semantic_statement=rule.semantic_statement_fail + " (No metrics data)")
         
-    query = f"SELECT max(value) as max_val FROM read_csv_auto('{metrics_path}') WHERE kpi_name = '{kpi_name}' {time_filter}"
+    kpi_map = state.get("discovered_kpi_map", {})
+    raw_kpis = map_generic_kpi_to_raw(kpi_name, kpi_map)
+    
+    if not raw_kpis:
+        return SemanticFact(rule_id=rule.rule_id, is_true=False, observed_value=None, semantic_statement=rule.semantic_statement_fail + f" (No raw telemetry maps to {kpi_name})")
+        
+    kpi_list_str = ", ".join(f"'{k}'" for k in raw_kpis)
+    query = f"SELECT max(value) as max_val FROM read_csv_auto('{metrics_path}') WHERE kpi_name IN ({kpi_list_str}) {time_filter}"
     
     try:
+        import math
         df = db.query(query)
         max_val = df['max_val'].iloc[0] if not df.empty else None
         
         is_true = False
         if max_val is not None:
-            if condition == ">":
-                is_true = max_val > threshold
-            elif condition == "<":
-                is_true = max_val < threshold
-            elif condition == "==":
-                is_true = max_val == threshold
+            max_val = float(max_val)
+            if math.isnan(max_val):
+                max_val = None
+            else:
+                if condition == ">":
+                    is_true = max_val > threshold
+                elif condition == "<":
+                    is_true = max_val < threshold
+                elif condition == "==":
+                    is_true = max_val == threshold
                 
         stmt = rule.semantic_statement_pass if is_true else rule.semantic_statement_fail
         stmt += f" (Observed: {max_val})"
@@ -72,8 +103,8 @@ def semantic_evaluator_node(state: InvestigationState) -> dict[str, Any]:
     evaluated_rules = set()
         
     for candidate in candidates:
-        if candidate.fired:
-            playbook = PLAYBOOK_REGISTRY.get(candidate.scenario_id)
+        if candidate.get("fired"):
+            playbook = PLAYBOOK_REGISTRY.get(candidate.get("scenario_id"))
             if not playbook:
                 continue
             
@@ -85,10 +116,10 @@ def semantic_evaluator_node(state: InvestigationState) -> dict[str, Any]:
                 
                 if rule.rule_type == "metric_threshold":
                     fact = evaluate_metric_threshold(rule, state, db, time_filter)
-                    facts.append(fact)
+                    facts.append(fact.model_dump())
                 elif rule.rule_type == "custom_query":
                     fact = evaluate_custom_query(rule, state, db, time_filter)
-                    facts.append(fact)
+                    facts.append(fact.model_dump())
                 # Future: log_pattern, trace_duration
                 else:
                     facts.append(SemanticFact(
@@ -96,6 +127,6 @@ def semantic_evaluator_node(state: InvestigationState) -> dict[str, Any]:
                         is_true=False, 
                         observed_value=None, 
                         semantic_statement=f"Unsupported rule type: {rule.rule_type}"
-                    ))
+                    ).model_dump())
                     
     return {"semantic_facts": facts}

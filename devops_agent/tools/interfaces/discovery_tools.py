@@ -1,6 +1,35 @@
 """Discovery Tools (Tools 2 and 3)."""
 
+from typing import Any
 from pydantic import BaseModel, Field, field_validator
+
+def group_redundant_kpis(kpi_list: list[str]) -> Any:
+    groups = {}
+    ungrouped = []
+    for kpi in kpi_list:
+        if "_" in kpi:
+            parts = kpi.rsplit("_", 1)
+            prefix = parts[0]
+            suffix = parts[1]
+            if prefix not in groups:
+                groups[prefix] = []
+            groups[prefix].append(suffix)
+        else:
+            ungrouped.append(kpi)
+            
+    result = {}
+    for prefix, suffixes in groups.items():
+        if len(suffixes) > 1:
+            result[prefix] = suffixes
+        else:
+            ungrouped.append(f"{prefix}_{suffixes[0]}")
+            
+    if ungrouped and not result:
+        return ungrouped
+    elif ungrouped:
+        result["_other_"] = ungrouped
+        
+    return result if result else ungrouped
 
 from devops_agent.core.db.duckdb_client import DuckDBClient
 from devops_agent.tools.interfaces.validators import parse_timestamp
@@ -13,7 +42,7 @@ from .baseline_tools import _BASELINE_STORE
 
 class QueryAnomalyOutput(BaseModel):
     affected_components: list[str] = Field(description="List of components (cmdb_id or tc) that breached the threshold.")
-    anomalous_metrics_by_component: dict[str, list[str]] = Field(description="Mapping of component to a list of breaching metrics/logs.")
+    anomalous_metrics_by_component: dict[str, Any] = Field(description="Mapping of component to a list or structured dict of breaching metrics/logs.")
     t0_sources: list[str] = Field(description="Components that breached first temporally.")
     no_anomalies_detected: bool = Field(description="True if no components breached the criteria.")
 
@@ -120,9 +149,15 @@ class QueryMetricsTool(BaseTool[QueryMetricsInput, QueryAnomalyOutput]):
                     t0_components.add(cmdb_id)
 
         affected = list(anomalous_kpis.keys())
+        
+        grouped_kpis = {
+            cid: group_redundant_kpis(kpis) 
+            for cid, kpis in anomalous_kpis.items()
+        }
+        
         return QueryAnomalyOutput(
             affected_components=affected,
-            anomalous_metrics_by_component=anomalous_kpis,
+            anomalous_metrics_by_component=grouped_kpis,
             t0_sources=list(t0_components),
             no_anomalies_detected=len(affected) == 0
         )
@@ -182,6 +217,7 @@ class QueryAppStatsTool(BaseTool[QueryAppStatsInput, QueryAnomalyOutput]):
                         t0_components.add(tc)
 
         affected = list(anomalous_tcs.keys())
+        
         return QueryAnomalyOutput(
             affected_components=affected,
             anomalous_metrics_by_component=anomalous_tcs,

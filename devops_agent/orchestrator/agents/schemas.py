@@ -61,6 +61,7 @@ class TriageAgentOutput(BaseModel):
     boundary_ambiguous_components: list[str] = Field(default_factory=list)
     dependency_graph: dict[str, Any] = Field(default_factory=dict)
     investigation_state: Literal["active", "AMBIGUOUS_PRE_EVIDENCE", "AMBIGUOUS", "INCONCLUSIVE", "complete"] = "active"
+    rejected_playbooks: list[str] = Field(default_factory=list, description="IDs of playbooks that were initially confirmed but rejected after deep investigation.")
     current_node: str = "triage"
 
 class EvidenceItem(BaseModel):

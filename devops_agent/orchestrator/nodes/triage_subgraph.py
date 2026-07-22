@@ -37,25 +37,31 @@ async def triage_llm_node(state: TriageState, config: RunnableConfig) -> dict[st
         bundle = agent.construct_prompt_bundle(state)
         
         # Inject confirmed playbooks
-        confirmed_verdicts = [v for v in state.get("playbook_verdicts", []) if v.status == "confirmed"]
-        injected_playbooks = [PLAYBOOK_REGISTRY[v.scenario_id] for v in confirmed_verdicts if v.scenario_id in PLAYBOOK_REGISTRY]
+        confirmed_verdicts = [v for v in state.get("playbook_verdicts", []) if v.get("status") == "confirmed"]
+        injected_playbooks = [PLAYBOOK_REGISTRY[v.get("scenario_id")] for v in confirmed_verdicts if v.get("scenario_id") in PLAYBOOK_REGISTRY]
         
         if injected_playbooks:
             facts = state.get("semantic_facts", [])
-            facts_str = "\\n".join(f"- {f.semantic_statement}" for f in facts) if facts else "No semantic facts evaluated."
+            facts_str = "\\n".join(f"- {f.get('semantic_statement')}" for f in facts) if facts else "No semantic facts evaluated."
             
+            def get_attr(obj, attr, default=""):
+                return obj.get(attr, default) if isinstance(obj, dict) else getattr(obj, attr, default)
+                
             knowledge_block = "\\n\\n".join(
-                f"PLAYBOOK: {p.display_name}\\n"
-                f"Causal Patterns: {', '.join(p.causal_patterns)}\\n"
-                f"Checklist: {', '.join(p.diagnostic_checklist)}\\n"
-                f"Differentiators: {', '.join(p.differentiators)}\\n"
+                f"PLAYBOOK ID: {get_attr(p, 'scenario_id')}\\n"
+                f"Name: {get_attr(p, 'display_name')}\\n"
+                f"Causal Patterns: {', '.join(get_attr(p, 'causal_patterns', []))}\\n"
+                f"Checklist: {', '.join(get_attr(p, 'diagnostic_checklist', []))}\\n"
+                f"Differentiators: {', '.join(get_attr(p, 'differentiators', []))}\\n"
                 f"EVALUATED FACTS:\\n{facts_str}"
                 for p in injected_playbooks
             )
             instruction = (
-                "Use the following confirmed diagnostic playbooks as your primary reasoning scaffold. "
-                "If multiple playbooks are present, determine which is the root cause and which are downstream "
-                "symptoms using the differentiators provided.\\n\\n" + knowledge_block
+                "The following playbooks have been tentatively matched based on partial symptom overlap. "
+                "You MUST verify this assumption. Actively use your tools to hunt for disconfirming signals "
+                "or distinct novel root causes (e.g., OOM events causing secondary CPU spikes). "
+                "If the evidence contradicts the playbook, you MUST reject it, add its ID to `rejected_playbooks`, "
+                "and proceed with an open-ended investigation from first principles.\\n\\n" + knowledge_block
             )
         else:
             instruction = (
@@ -136,8 +142,9 @@ CONSTRAINTS & RULES
                 "id": "fatal_error_tc"
             }]
         )
-        
-    return {"triage_messages": [response] if not state.get("triage_messages") else messages + [response]}
+    if not state.get("triage_messages"):
+        return {"triage_messages": messages + [response]}
+    return {"triage_messages": [response]}
 
 async def triage_tools_node(state: TriageState, config: RunnableConfig) -> dict[str, Any]:
     messages = state.get("triage_messages", [])
@@ -183,7 +190,7 @@ async def triage_tools_node(state: TriageState, config: RunnableConfig) -> dict[
         if name == "SubmitTriageReport":
             final_output = tc["args"]
             parsed = agent.parse_output(final_output)
-            # Add an empty state override for clean return mapping
+            parsed["triage_completed"] = True
             return parsed
             
         elif name in tool_map:
@@ -206,7 +213,8 @@ async def triage_tools_node(state: TriageState, config: RunnableConfig) -> dict[
                     "investigation_cluster": [],
                     "ranked_hypotheses": [],
                     "investigation_state": "AMBIGUOUS_PRE_EVIDENCE",
-                    "current_node": "triage"
+                    "current_node": "triage",
+                    "triage_completed": True
                 }
                 return parsed
                 
@@ -232,21 +240,16 @@ def triage_should_continue(state: TriageState) -> str:
     if not messages:
         return "triage_llm_node"
         
-    last_msg = messages[-1]
-    
-    # If LLM didn't call tools, route to tools so we can inject the warning message
-    if not hasattr(last_msg, "tool_calls") or not last_msg.tool_calls:
-        return "triage_tools_node"
-        
-    for tc in last_msg.tool_calls:
-        if tc["name"] == "SubmitTriageReport":
-            return END
-            
     # Loop break check
     if state.get("triage_duplicates", 0) >= 3:
         return END
         
     return "triage_tools_node"
+
+def route_after_triage_tools(state: TriageState) -> str:
+    if state.get("triage_completed"):
+        return END
+    return "triage_llm_node"
 
 def build_triage_subgraph():
     builder = StateGraph(TriageState)
@@ -264,6 +267,13 @@ def build_triage_subgraph():
         }
     )
     
-    builder.add_edge("triage_tools_node", "triage_llm_node")
+    builder.add_conditional_edges(
+        "triage_tools_node",
+        route_after_triage_tools,
+        {
+            "triage_llm_node": "triage_llm_node",
+            END: END
+        }
+    )
     
     return builder.compile()

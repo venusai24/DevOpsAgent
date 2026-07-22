@@ -35,6 +35,6 @@ evaluation_rules:
   - rule_id: "load_average_high"
     rule_type: "custom_query"
     parameters:
-      sql: "SELECT max(value) > 4 as is_true FROM read_csv_auto('{metrics_path}') WHERE kpi_name = 'load_average_1m' {time_filter}"
+      sql: "SELECT max(value) > 4 as is_true FROM read_csv_auto('{metrics_path}') WHERE kpi_name ILIKE '%load%' {time_filter}"
     semantic_statement_pass: "[PASSED] Load average 1m exceeded CPU count."
     semantic_statement_fail: "[FAILED] Load average 1m was normal."

@@ -43,10 +43,6 @@ class ContextAssemblerService:
                     "cmdb_declared_role": "unknown"
                 }
                 
-        tc_to_operation_map = {}
-        for tc in discovered_tc_values:
-            tc_to_operation_map[tc] = {"operation": tc}
-            
         stack_kpi_map = [
             {"stack_type": "jvm", "kpis": ["cpu", "memory", "tomcat_request", "tomcat_session", "tomcat_thread"]},
             {"stack_type": "mysql", "kpis": ["cpu", "memory", "network", "disk", "process"]},
@@ -57,7 +53,6 @@ class ContextAssemblerService:
         
         return {
             "component_registry": component_registry,
-            "tc_to_operation_map": tc_to_operation_map,
             "stack_kpi_map": stack_kpi_map,
             "stage_0_gaps": [],
             "current_node": "context_assembly"

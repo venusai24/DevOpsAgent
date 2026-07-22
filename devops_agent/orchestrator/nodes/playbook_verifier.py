@@ -35,7 +35,7 @@ If a substantially better explanation exists outside this playbook, say so and m
 def route_to_verifiers(state: InvestigationState) -> list[Send] | str:
     """Routes candidates to verifiers or falls back to natural intelligence."""
     SIGNAL_FLOOR = 0.25 # Lowered slightly for broader recall at verifier stage
-    candidates = [c for c in state.get("match_results", []) if c.fired and c.signal_strength >= SIGNAL_FLOOR]
+    candidates = [c for c in state.get("match_results", []) if c.get("fired") and c.get("signal_strength", 0.0) >= SIGNAL_FLOOR]
     
     if not candidates:
         return "natural_intelligence_triage"
@@ -45,19 +45,19 @@ def route_to_verifiers(state: InvestigationState) -> list[Send] | str:
 
 async def verify_playbook_node(state: dict[str, Any]) -> dict[str, Any]:
     """Node that actually verifies a single candidate."""
-    candidate: MatchResult = state["candidate"]
+    candidate = state["candidate"]
     context_slice = state["context"]
     
-    playbook = PLAYBOOK_REGISTRY.get(candidate.scenario_id)
+    playbook = PLAYBOOK_REGISTRY.get(candidate.get("scenario_id"))
     if not playbook:
         return {"playbook_verdicts": [PlaybookVerdict(
-            scenario_id=candidate.scenario_id, 
+            scenario_id=candidate.get("scenario_id", "unknown"), 
             status="refuted", 
             rationale="Playbook not found in registry."
-        )]}
+        ).model_dump()]}
         
     facts = state.get("semantic_facts", [])
-    facts_str = "\\n".join(f"- {f.semantic_statement}" for f in facts) if facts else "No semantic facts evaluated."
+    facts_str = "\\n".join(f"- {f.get('semantic_statement')}" for f in facts) if facts else "No semantic facts evaluated."
         
     prompt = VERIFIER_PROMPT.format(
         playbook_name=playbook.display_name,
@@ -72,16 +72,17 @@ async def verify_playbook_node(state: dict[str, Any]) -> dict[str, Any]:
     try:
         verdict = await llm.ainvoke([SystemMessage(content="You are a strict falsification-focused diagnostic reviewer."), HumanMessage(content=prompt)])
     except Exception as e:
-        verdict = PlaybookVerdict(scenario_id=candidate.scenario_id, status="inconclusive", rationale=f"LLM Error: {e}")
+        verdict = PlaybookVerdict(scenario_id=candidate.get("scenario_id", "unknown"), status="inconclusive", rationale=f"LLM Error: {e}")
         
     # Ensure scenario_id is set correctly in case LLM missed it
-    verdict.scenario_id = getattr(candidate, "scenario_id", "")
+    if not getattr(verdict, "scenario_id", None):
+        verdict.scenario_id = candidate.get("scenario_id", "")
     
-    return {"playbook_verdicts": [verdict]}
+    return {"playbook_verdicts": [verdict.model_dump()]}
 
 def resolve_verdicts(state: InvestigationState) -> str:
     """Routes after verifiers complete."""
-    confirmed = [v for v in state.get("playbook_verdicts", []) if v.status == "confirmed"]
+    confirmed = [v for v in state.get("playbook_verdicts", []) if v.get("status") == "confirmed"]
     if not confirmed:
         return "natural_intelligence_triage"
         

@@ -19,10 +19,10 @@ class TriageAgent:
                 "time_range": state.get("time_range"),
                 "explicit_symptoms": state.get("explicit_symptoms", {}),
                 "component_registry": state.get("component_registry", {}),
-                "tc_to_operation_map": state.get("tc_to_operation_map", {}),
+                "healthy_components": state.get("healthy_components", ()),
                 "stack_kpi_map": state.get("stack_kpi_map", []),
                 "baseline_registry_ref": state.get("baseline_registry_ref", ""),
-                "declared_topology_graph": state.get("declared_topology_graph", {})
+                "topology_graph": state.get("discovered_topology_graph") or state.get("declared_topology_graph", {})
             }
         }
         
@@ -43,6 +43,7 @@ class TriageAgent:
             "boundary_ambiguous_components": llm_response.get("boundary_ambiguous_components", []),
             "dependency_graph": llm_response.get("dependency_graph", {}),
             "ranked_hypotheses": llm_response.get("ranked_hypotheses", []),
+            "rejected_playbooks": llm_response.get("rejected_playbooks", []),
             "investigation_state": llm_response.get("investigation_state", "active"),
             "current_node": "triage"
         }

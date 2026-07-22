@@ -120,8 +120,9 @@ CONSTRAINTS & RULES
                 "id": "fatal_error_tc"
             }]
         )
-        
-    return {"rca_messages": [response] if not state.get("rca_messages") else messages + [response]}
+    if not state.get("rca_messages"):
+        return {"rca_messages": messages + [response]}
+    return {"rca_messages": [response]}
 
 async def rca_tools_node(state: RCAState, config: RunnableConfig) -> dict[str, Any]:
     messages = state.get("rca_messages", [])
@@ -166,7 +167,12 @@ async def rca_tools_node(state: RCAState, config: RunnableConfig) -> dict[str, A
     rca_fingerprints = state.get("rca_fingerprints", [])
     rca_hypothesis_calls = state.get("rca_hypothesis_calls", {})
     
-    surviving = list(state.get("surviving_hypotheses", []))
+    surviving = state.get("surviving_hypotheses")
+    if surviving is None or not surviving:
+        ranked = state.get("ranked_hypotheses", [])
+        surviving = [h.get("hypothesis", h.get("name", "unknown")) for h in ranked] if isinstance(ranked, list) else []
+    else:
+        surviving = list(surviving)
     
     evidence_log = state.get("evidence_log", [])
     if not evidence_log:
@@ -183,6 +189,7 @@ async def rca_tools_node(state: RCAState, config: RunnableConfig) -> dict[str, A
             parsed = final_output.copy()
             parsed["current_node"] = "rca"
             parsed["evidence_log"] = evidence_log
+            parsed["rca_completed"] = True
             return parsed
             
         elif name in tool_map:
@@ -208,7 +215,8 @@ async def rca_tools_node(state: RCAState, config: RunnableConfig) -> dict[str, A
                     "investigation_state": "AMBIGUOUS",
                     "current_node": "rca",
                     "investigation_gaps": [{"reason": "Loop prevention triggered in RCA"}],
-                    "evidence_log": evidence_log
+                    "evidence_log": evidence_log,
+                    "rca_completed": True
                 }
                 return parsed
                 
@@ -231,7 +239,8 @@ async def rca_tools_node(state: RCAState, config: RunnableConfig) -> dict[str, A
                     "investigation_state": "AMBIGUOUS",
                     "current_node": "rca",
                     "investigation_gaps": [{"reason": "Budget exhausted in RCA"}],
-                    "evidence_log": evidence_log
+                    "evidence_log": evidence_log,
+                    "rca_completed": True
                 }
                 return parsed
                 
@@ -268,21 +277,16 @@ def rca_should_continue(state: RCAState) -> str:
     if not messages:
         return "rca_llm_node"
         
-    last_msg = messages[-1]
-    
     # Global stopping condition
     scores = state.get("updated_hypothesis_scores", {})
-    surviving = state.get("surviving_hypotheses", [])
+    surviving = state.get("surviving_hypotheses")
+    if surviving is None:
+        ranked = state.get("ranked_hypotheses", [])
+        surviving = [h.get("hypothesis", h.get("name", "unknown")) for h in ranked] if isinstance(ranked, list) else []
+        
     if _global_stopping_condition_met(scores, surviving):
         return END
         
-    if not hasattr(last_msg, "tool_calls") or not last_msg.tool_calls:
-        return "rca_tools_node"
-        
-    for tc in last_msg.tool_calls:
-        if tc["name"] == "SubmitEvidenceReport":
-            return END
-            
     if state.get("rca_duplicates", 0) >= 3:
         return END
         
@@ -291,6 +295,11 @@ def rca_should_continue(state: RCAState) -> str:
         return END
         
     return "rca_tools_node"
+
+def route_after_rca_tools(state: RCAState) -> str:
+    if state.get("rca_completed"):
+        return END
+    return "rca_llm_node"
 
 def build_rca_subgraph():
     builder = StateGraph(RCAState)
@@ -308,6 +317,13 @@ def build_rca_subgraph():
         }
     )
     
-    builder.add_edge("rca_tools_node", "rca_llm_node")
+    builder.add_conditional_edges(
+        "rca_tools_node",
+        route_after_rca_tools,
+        {
+            "rca_llm_node": "rca_llm_node",
+            END: END
+        }
+    )
     
     return builder.compile()

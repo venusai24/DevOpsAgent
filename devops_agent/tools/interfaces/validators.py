@@ -12,6 +12,11 @@ def parse_timestamp(value: str | int | float, field_name: str) -> float:
     if isinstance(value, (int, float)):
         return float(value)
     try:
-        return datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp()
-    except ValueError:
-        raise ValueError(f"'{field_name}'={value!r} is not a recognized timestamp. {FORMAT_HINT}")
+        import pandas as pd
+        return pd.to_datetime(str(value)).timestamp()
+    except Exception:
+        # Fallback to standard iso format
+        try:
+            return datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            raise ValueError(f"'{field_name}'={value!r} is not a recognized timestamp. {FORMAT_HINT}")

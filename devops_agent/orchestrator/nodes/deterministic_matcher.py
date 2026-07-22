@@ -49,6 +49,6 @@ def deterministic_matcher_node(state: InvestigationState) -> dict[str, Any]:
     
     for playbook in PLAYBOOK_REGISTRY.values():
         result = match_playbook(playbook, kpi_map)
-        results.append(result)
+        results.append(result.model_dump())
         
     return {"match_results": results}

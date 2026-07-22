@@ -64,13 +64,14 @@ class InvestigationState(TypedDict, total=False):
     discovered_topology_graph: dict[str, list[str]]
     tc_to_operation_map: dict[str, dict[str, Any]]
     stack_kpi_map: list[tuple[tuple[str, str], list[str]]] # Serialized tuple keys
+    discovered_kpi_map: dict[str, Any]
     baseline_registry_ref: str
     stage_0_gaps: list[dict[str, Any]]
     
     # ── Stage 0.5: Deterministic Matching & Verification ───────
-    match_results: list[MatchResult]
-    semantic_facts: list[SemanticFact]
-    playbook_verdicts: Annotated[list[PlaybookVerdict], operator.add]
+    match_results: list[dict[str, Any]]
+    semantic_facts: list[dict[str, Any]]
+    playbook_verdicts: Annotated[list[dict[str, Any]], operator.add]
     
     # ── Stages 1–4: Triage ────────────────────────────────────────────
     blast_radius: Literal["localized", "selective", "broad", "systemic"]
@@ -86,6 +87,7 @@ class InvestigationState(TypedDict, total=False):
     concurrent_incident_clusters: list[list[str]]
     boundary_ambiguous_components: list[str]
     ranked_hypotheses: list[HypothesisSpec]
+    rejected_playbooks: list[str]
     
     # ── Stages 5–8: RCA ───────────────────────────────────────────────
     evidence_matrix: dict[str, list[EvidenceItem]]
