@@ -24,9 +24,19 @@ class TriageAgentOutput(BaseModel):
     investigation_state: Literal["active", "AMBIGUOUS_PRE_EVIDENCE", "AMBIGUOUS", "INCONCLUSIVE", "complete"] = "active"
     current_node: str = "triage"
 
-class RCAAgentOutput(BaseModel):
-    evidence_matrix: dict[str, list[dict[str, Any]]] = Field(default_factory=dict, description="Evidence collected per hypothesis.")
-    updated_hypothesis_scores: dict[str, float] = Field(default_factory=dict)
+class EvidenceItem(BaseModel):
+    hypothesis_id: str
+    evidence_source: Literal["metric", "log"]
+    raw_reference: dict[str, Any]
+    directional_support: Literal["strongly_supports", "weakly_supports", "neutral", "weakly_contradicts", "strongly_contradicts"]
+    rationale: str
+
+class SubmitEvidenceReport(BaseModel):
+    evidence_items: list[EvidenceItem] = Field(default_factory=list)
+    primary_hypothesis_id: str | None = None
+    narrative_summary: str = ""
+    is_ready_to_conclude: bool = False
+    
     eliminated_hypotheses: list[dict[str, Any]] = Field(default_factory=list)
     surviving_hypotheses: list[str] = Field(default_factory=list)
     primary_bottleneck: dict[str, Any] | None = None
@@ -35,9 +45,14 @@ class RCAAgentOutput(BaseModel):
     propagation_verified_pairs: list[dict[str, Any]] = Field(default_factory=list)
     root_cause_candidate: dict[str, Any] | None = Field(default=None, description="The confirmed root cause.")
     causal_chain: list[dict[str, Any]] = Field(default_factory=list, description="Chain of propagation.")
-    confidence_level: Literal["HIGH", "MEDIUM", "LOW", "INCONCLUSIVE"] | None = Field(default=None)
     unconfirmed_links: list[dict[str, Any]] = Field(default_factory=list)
     final_report: dict[str, Any] | None = Field(default=None, description="Structured final report.")
     investigation_state: Literal["active", "AMBIGUOUS", "INCONCLUSIVE", "complete"] = "active"
     investigation_gaps: list[dict[str, Any]] = Field(default_factory=list)
     current_node: str = "rca"
+
+class CriticVerdict(BaseModel):
+    evidence_item_id: str
+    verdict: Literal["confirm_original", "override"]
+    corrected_support: Literal["strongly_supports", "weakly_supports", "neutral", "weakly_contradicts", "strongly_contradicts"] | None = None
+    rationale: str

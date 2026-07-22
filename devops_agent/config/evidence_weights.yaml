@@ -1,0 +1,14 @@
+metric:
+  strongly_supports: 1.5
+  weakly_supports: 0.5
+  neutral: 0.0
+  weakly_contradicts: -0.5
+  strongly_contradicts: -1.5
+log:
+  strongly_supports: 1.2
+  weakly_supports: 0.4
+  neutral: 0.0
+  weakly_contradicts: -0.4
+  strongly_contradicts: -1.2
+critic_trigger:
+  mismatch_ratio_threshold: 0.15

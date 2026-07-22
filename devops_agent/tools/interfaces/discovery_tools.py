@@ -1,6 +1,7 @@
 """Discovery Tools (Tools 2 and 3)."""
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+from devops_agent.tools.interfaces.validators import parse_timestamp
 
 from devops_agent.core.db.duckdb_client import DuckDBClient
 
@@ -18,24 +19,44 @@ class QueryAnomalyOutput(BaseModel):
 
 class QueryMetricsInput(BaseModel):
     baseline_ref: str = Field(description="Reference key from compute_baseline_statistics.")
-    time_range_start: str = Field(description="Incident start window.")
-    time_range_end: str = Field(description="Incident end window.")
+    time_range_start: str | int | float = Field(description="Incident start window.")
+    time_range_end: str | int | float = Field(description="Incident end window.")
     anomaly_threshold_z: float = Field(default=3.0, description="Minimum z-score deviation to flag.")
+
+    @field_validator("time_range_start", "time_range_end", mode="before")
+    @classmethod
+    def _validate_timestamp(cls, v, info):
+        return parse_timestamp(v, info.field_name)
 
 class QueryAppStatsInput(BaseModel):
     baseline_ref: str = Field(description="Reference key from compute_baseline_statistics.")
-    time_range_start: str = Field(description="Incident start window.")
-    time_range_end: str = Field(description="Incident end window.")
+    time_range_start: str | int | float = Field(description="Incident start window.")
+    time_range_end: str | int | float = Field(description="Incident end window.")
+
+    @field_validator("time_range_start", "time_range_end", mode="before")
+    @classmethod
+    def _validate_timestamp(cls, v, info):
+        return parse_timestamp(v, info.field_name)
 
 class QueryLogsInput(BaseModel):
     baseline_ref: str = Field(description="Reference key from compute_baseline_statistics.")
-    time_range_start: str = Field(description="Incident start window.")
-    time_range_end: str = Field(description="Incident end window.")
+    time_range_start: str | int | float = Field(description="Incident start window.")
+    time_range_end: str | int | float = Field(description="Incident end window.")
+
+    @field_validator("time_range_start", "time_range_end", mode="before")
+    @classmethod
+    def _validate_timestamp(cls, v, info):
+        return parse_timestamp(v, info.field_name)
 
 class QueryTracesInput(BaseModel):
     baseline_ref: str = Field(description="Reference key from compute_baseline_statistics.")
-    time_range_start: str = Field(description="Incident start window.")
-    time_range_end: str = Field(description="Incident end window.")
+    time_range_start: str | int | float = Field(description="Incident start window.")
+    time_range_end: str | int | float = Field(description="Incident end window.")
+
+    @field_validator("time_range_start", "time_range_end", mode="before")
+    @classmethod
+    def _validate_timestamp(cls, v, info):
+        return parse_timestamp(v, info.field_name)
 
 class RunConnectedComponentAnalysisInput(BaseModel):
     affected_components: list[str] = Field(description="Output from query_anomalous_components.")
@@ -62,13 +83,9 @@ class QueryMetricsTool(BaseTool[QueryMetricsInput, QueryAnomalyOutput]):
         baseline_data = _BASELINE_STORE.get(inputs.baseline_ref, {}).get("container_metrics", {})
         db = DuckDBClient.get_instance()
         
-        try:
-            import pandas as pd
-            t_start = pd.to_datetime(inputs.time_range_start).timestamp()
-            t_end = pd.to_datetime(inputs.time_range_end).timestamp()
-        except ValueError:
-            t_start = float(inputs.time_range_start)
-            t_end = float(inputs.time_range_end)
+        # Inputs are already valid floats due to validator
+        t_start = inputs.time_range_start
+        t_end = inputs.time_range_end
 
         sql = f"SELECT * FROM read_csv_auto('{ctx.metrics_path}') WHERE timestamp >= ? AND timestamp <= ? ORDER BY timestamp ASC"
         df = db.query(sql, (t_start, t_end))
@@ -125,13 +142,9 @@ class QueryAppStatsTool(BaseTool[QueryAppStatsInput, QueryAnomalyOutput]):
         baseline_data = _BASELINE_STORE.get(inputs.baseline_ref, {}).get("app_metrics", {})
         db = DuckDBClient.get_instance()
         
-        try:
-            import pandas as pd
-            t_start = pd.to_datetime(inputs.time_range_start).timestamp()
-            t_end = pd.to_datetime(inputs.time_range_end).timestamp()
-        except ValueError:
-            t_start = float(inputs.time_range_start)
-            t_end = float(inputs.time_range_end)
+        # Inputs are already valid floats due to validator
+        t_start = inputs.time_range_start
+        t_end = inputs.time_range_end
 
         sql = f"SELECT * FROM read_csv_auto('{ctx.app_stats_path}') WHERE timestamp >= ? AND timestamp <= ? ORDER BY timestamp ASC"
         df = db.query(sql, (t_start, t_end))
@@ -188,13 +201,9 @@ class QueryLogsTool(BaseTool[QueryLogsInput, QueryAnomalyOutput]):
     def schema(self) -> ToolSchema[QueryLogsInput]:
         return ToolSchema(input_type=QueryLogsInput, output_type=QueryAnomalyOutput)
     async def execute(self, ctx: ToolContext, inputs: QueryLogsInput) -> QueryAnomalyOutput:
-        try:
-            import pandas as pd
-            t_start = pd.to_datetime(inputs.time_range_start).timestamp()
-            t_end = pd.to_datetime(inputs.time_range_end).timestamp()
-        except ValueError:
-            t_start = float(inputs.time_range_start)
-            t_end = float(inputs.time_range_end)
+        # Inputs are already valid floats due to validator
+        t_start = inputs.time_range_start
+        t_end = inputs.time_range_end
 
         db = DuckDBClient.get_instance()
         sql = f"""
@@ -238,13 +247,9 @@ class QueryTracesTool(BaseTool[QueryTracesInput, QueryAnomalyOutput]):
     def schema(self) -> ToolSchema[QueryTracesInput]:
         return ToolSchema(input_type=QueryTracesInput, output_type=QueryAnomalyOutput)
     async def execute(self, ctx: ToolContext, inputs: QueryTracesInput) -> QueryAnomalyOutput:
-        try:
-            import pandas as pd
-            t_start = pd.to_datetime(inputs.time_range_start).timestamp() * 1000
-            t_end = pd.to_datetime(inputs.time_range_end).timestamp() * 1000
-        except ValueError:
-            t_start = float(inputs.time_range_start) * 1000
-            t_end = float(inputs.time_range_end) * 1000
+        # Inputs are already valid floats due to validator, but tracing tool uses milliseconds
+        t_start = inputs.time_range_start * 1000
+        t_end = inputs.time_range_end * 1000
 
         db = DuckDBClient.get_instance()
         sql = f"""

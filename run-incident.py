@@ -10,6 +10,7 @@ from devops_agent.orchestrator.state import InvestigationState
 logging.basicConfig(level=logging.INFO)
 
 investigation_id = str(uuid.uuid4())
+trace_run_id = str(uuid.uuid4())
 init_observability(run_id=investigation_id)
 
 # 1. Initialize the Dependency Injection Container
@@ -25,6 +26,7 @@ end_time = datetime(2021, 3, 4, 10, 30, 0, tzinfo=UTC)
 # 3. Create the Initial Investigation State
 initial_state = InvestigationState(
     investigation_id=investigation_id,
+    current_trace_run_id=trace_run_id,
     investigation_state="active",
     time_range=(start_time, end_time),
     investigation_cluster=[],  # Agent will discover this via tools
@@ -45,7 +47,11 @@ initial_state = InvestigationState(
     explicit_symptoms={"dependencies_unknown": True}
 )
 
-config = {"configurable": {"thread_id": investigation_id}}
+config = {
+    "configurable": {"thread_id": investigation_id},
+    "run_name": "DevOps-Investigation",
+    "run_id": trace_run_id
+}
 
 # 4. Execute the LangGraph Multi-Agent Orchestrator
 print(f"Starting Investigation: {investigation_id}")

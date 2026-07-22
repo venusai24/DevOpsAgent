@@ -18,9 +18,13 @@ from devops_agent.tools.interfaces.baseline_tools import (
 from devops_agent.tools.langchain_adapter import wrap_tools
 from devops_agent.tools.models import ToolContext
 from devops_agent.tools.registry import get_registry
+from devops_agent.tools.interfaces.tracing_tools import (
+    ExtractTraceDependencyEdgesInput,
+    ExtractTraceDependencyEdgesTool,
+)
 
 from ..agents.context_assembler import ContextAssemblerService
-from ..agents.schemas import RCAAgentOutput, TriageAgentOutput
+from ..agents.schemas import TriageAgentOutput
 from ..agents.triage_agent import TriageAgent
 from ..state import InvestigationState
 
@@ -159,6 +163,21 @@ async def context_assembler_agent_node(state: InvestigationState, config: Runnab
         all_declared_components = set(declared_graph.keys())
         active_components = set(cmdb_ids) | set(tc_values) | set(log_cmdb_ids) | set(trace_cmdb_ids)
         healthy_components = list(all_declared_components - active_components)
+        
+        discovered_topology = {}
+        if dependencies_unknown:
+            trace_tool = ExtractTraceDependencyEdgesTool()
+            t_input = ExtractTraceDependencyEdgesInput(
+                time_range_start=start_str,
+                time_range_end=end_str,
+                cmdb_ids=list(active_components)
+            )
+            try:
+                t_output = await trace_tool.execute(ctx, t_input)
+                for caller, callees in t_output.caller_callee_frequencies.items():
+                    discovered_topology[caller] = list(callees.keys())
+            except Exception as e:
+                print(f"Failed to extract trace dependencies: {e}")
             
     except Exception as e:
         print(f"Error querying programmatic context: {e}")
@@ -174,256 +193,9 @@ async def context_assembler_agent_node(state: InvestigationState, config: Runnab
     parsed = service.assemble(state, cmdb_ids, tc_values)
     parsed["baseline_registry_ref"] = baseline_ref
     
+    if dependencies_unknown and 'discovered_topology' in locals():
+        parsed["discovered_topology_graph"] = discovered_topology
+    
     return parsed
 
-class SubmitTriageReport(TriageAgentOutput):
-    """Submit the final investigation brief and triage findings. Call this ONLY when you have finished using the other tools to investigate the data."""
-    pass
 
-class SubmitRCAReport(RCAAgentOutput):
-    """Submit the final investigation report and RCA findings. Call this ONLY when you have isolated the root cause or hit an ambiguous/inconclusive state."""
-    pass
-
-async def triage_agent_node(state: InvestigationState, config: RunnableConfig) -> dict[str, Any]:
-    agent = TriageAgent()
-    bundle = agent.construct_prompt_bundle(state)
-    
-    registry = get_registry()
-    executor = ToolExecutor(registry)
-    inv_id_str = state.get("investigation_id", str(uuid.uuid4()))
-    ctx = ToolContext(
-        investigation_id=uuid.UUID(inv_id_str), 
-        cluster_id="triage", 
-        baseline_ref=state.get("baseline_registry_ref"),
-        app_stats_path=state.get("app_stats_path"),
-        metrics_path=state.get("metrics_path"),
-        logs_path=state.get("logs_path"),
-        traces_path=state.get("traces_path"),
-        topology_graph=state.get("declared_topology_graph", {})
-    )
-    
-    # Tools needed for triage (Stages 1-4)
-    t1 = registry.get("triage_query_metrics")
-    t2 = registry.get("triage_query_app_stats")
-    t3 = registry.get("triage_query_logs")
-    t4 = registry.get("triage_query_traces")
-    t5 = registry.get("run_connected_component_analysis")
-    t6 = registry.get("extract_trace_dependency_edges")
-    t7 = registry.get("infer_metric_dependency_edges")
-    
-    tools = wrap_tools([t1, t2, t3, t4, t5, t6, t7], executor, ctx)
-    llm = LLMFactory.get_llm("triage").bind_tools(tools + [SubmitTriageReport])
-    
-    triage_system_prompt = """ROLE
---------
-You are the Triage Agent. Your task is to investigate and determine the incident blast radius using diagnostic tools.
-
-CONTEXT: DATA SOURCES & SCHEMAS
---------
-1. Metrics (triage_query_metrics): 'timestamp', 'cmdb_id', 'kpi_name', 'value'
-2. App Stats (triage_query_app_stats): 'timestamp', 'rr', 'sr', 'cnt', 'mrt', 'tc'. NO 'cmdb_id' or 'kpi_name'. Use 'tc' as component.
-3. Logs (triage_query_logs): 'log_id', 'timestamp', 'cmdb_id', 'log_name', 'value'. NO 'kpi_name'.
-4. Traces (triage_query_traces): 'timestamp', 'cmdb_id', 'parent_id', 'span_id', 'trace_id', 'duration'. NO 'kpi_name'.
-
-CONSTRAINTS & RULES
---------
-1. NO HALLUCINATION: Never assume a column exists if it is not explicitly listed in the schema for that specific source.
-2. NO GUESSING: If a requested analysis requires columns that do not exist, use a different tool or source.
-3. DEPENDENCY GRAPH: If dependencies are unknown, you MUST build the dependency graph using extract_trace_dependency_edges or infer_metric_dependency_edges BEFORE calling run_connected_component_analysis, and pass the constructed graph into it.
-4. When finished, you MUST call SubmitTriageReport."""
-    
-    messages = [
-        SystemMessage(content=triage_system_prompt),
-        HumanMessage(content=f"Analyze the incident blast radius based on state:\n{json.dumps(bundle, default=str)}")
-    ]
-    
-    tool_map = {t.name: t for t in tools}
-    tracker = StageProgressTracker()
-    
-    while True:
-        response = None
-        for attempt in range(3):
-            try:
-                response = await llm.ainvoke(messages, config=config)
-                break
-            except Exception as e:
-                if attempt == 2: raise e
-                await asyncio.sleep(1 * (2 ** attempt))
-        messages.append(response)
-        
-        if not response.tool_calls:
-            messages.append(HumanMessage(content="You did not call any tools. You must call SubmitTriageReport to finish."))
-            continue
-            
-        final_output = None
-        for tc in response.tool_calls:
-            name = tc["name"]
-            if name == "SubmitTriageReport":
-                final_output = tc["args"]
-                break
-            elif name in tool_map:
-                tool = tool_map[name]
-                tracker.record_tool_call(name, tc["args"])
-                if tracker.is_looping():
-                    final_output = {
-                        "blast_radius": "localized",
-                        "blast_radius_qualifier": "simultaneous",
-                        "symptom_pattern": "Loop prevention triggered.",
-                        "affected_component_candidates": [],
-                        "investigation_cluster": [],
-                        "ranked_hypotheses": [],
-                        "investigation_state": "AMBIGUOUS_PRE_EVIDENCE",
-                        "current_node": "triage"
-                    }
-                    break
-                try:
-                    result = await tool.ainvoke(tc["args"], config=config)
-                except KeyError as e:
-                    result = f"KeyError: {e}. Check your schema constraints. This column does not exist in the requested data source."
-                except Exception as e:
-                    result = f"Error executing tool: {e}"
-                messages.append(ToolMessage(content=str(result), tool_call_id=tc["id"]))
-            else:
-                messages.append(ToolMessage(content=f"Error: Unknown tool {name}", tool_call_id=tc["id"]))
-                
-        if final_output is not None:
-            return agent.parse_output(final_output)
-
-async def rca_agent_node(state: InvestigationState, config: RunnableConfig) -> dict[str, Any]:
-    from langchain_core.messages import ToolMessage
-
-    from ..agents.rca_agent import RCAAgent
-    
-    agent = RCAAgent()
-    bundle = agent.construct_prompt_bundle(state)
-    
-    registry = get_registry()
-    executor = ToolExecutor(registry)
-    inv_id_str = state.get("investigation_id", str(uuid.uuid4()))
-    ctx = ToolContext(
-        investigation_id=uuid.UUID(inv_id_str), 
-        cluster_id="rca", 
-        baseline_ref=state.get("baseline_registry_ref"),
-        app_stats_path=state.get("app_stats_path"),
-        metrics_path=state.get("metrics_path"),
-        logs_path=state.get("logs_path"),
-        traces_path=state.get("traces_path")
-    )
-    
-    # Load all RCA tools (Stages 5-8)
-    tool_names = [
-        "query_anomalous_traces", "build_span_tree_summary", 
-        "query_metrics_for_hypothesis", "query_logs_for_hypothesis", 
-        "run_propagation_direction_check", "query_app_stats_detailed",
-        "compute_metric_latency_correlation"
-    ]
-    
-    available_tools = []
-    for name in tool_names:
-        try:
-            available_tools.append(registry.get(name))
-        except Exception:
-            pass # Skip if not registered yet
-            
-    tools = wrap_tools(available_tools, executor, ctx)
-    llm = LLMFactory.get_llm("rca").bind_tools(tools + [SubmitRCAReport])
-    
-    rca_system_prompt = """ROLE
---------
-You are the RCA Agent. Your task is to deduce the root cause by gathering evidence for hypotheses.
-
-CONTEXT: DATA SOURCES & SCHEMAS
---------
-1. Metrics: 'timestamp', 'cmdb_id', 'kpi_name', 'value'
-2. App Stats: NO 'cmdb_id' or 'kpi_name'. Use 'tc'.
-3. Logs: NO 'kpi_name'. Use 'log_name'.
-4. Traces: NO 'kpi_name'.
-
-CONSTRAINTS & RULES
---------
-1. NO HALLUCINATION: Never assume a column exists if it is not explicitly listed.
-2. When finished, you MUST call SubmitRCAReport."""
-    
-    messages = [
-        SystemMessage(content=rca_system_prompt),
-        HumanMessage(content=f"Deduce root cause based on state:\n{json.dumps(bundle, default=str)}")
-    ]
-    
-    tool_map = {t.name: t for t in tools}
-    tracker = StageProgressTracker()
-    
-    while True:
-        response = None
-        for attempt in range(3):
-            try:
-                response = await llm.ainvoke(messages, config=config)
-                break
-            except Exception as e:
-                if attempt == 2: raise e
-                await asyncio.sleep(1 * (2 ** attempt))
-        messages.append(response)
-        
-        if not response.tool_calls:
-            messages.append(HumanMessage(content="You did not call any tools. You must call SubmitRCAReport to finish."))
-            continue
-            
-        final_output = None
-        for tc in response.tool_calls:
-            name = tc["name"]
-            if name == "SubmitRCAReport":
-                final_output = tc["args"]
-                break
-            elif name in tool_map:
-                tool = tool_map[name]
-                tracker.record_tool_call(name, tc["args"])
-                if tracker.is_looping():
-                    final_output = {
-                        "evidence_matrix": {},
-                        "updated_hypothesis_scores": state.get("updated_hypothesis_scores", {}),
-                        "eliminated_hypotheses": [],
-                        "surviving_hypotheses": [],
-                        "refined_dependency_graph": {},
-                        "undeclared_dependencies": [],
-                        "propagation_verified_pairs": [],
-                        "investigation_state": "AMBIGUOUS",
-                        "current_node": "rca",
-                        "investigation_gaps": [{"reason": "Loop prevention triggered in RCA"}]
-                    }
-                    break
-                try:
-                    result = await tool.ainvoke(tc["args"], config=config)
-                except KeyError as e:
-                    result = f"KeyError: {e}. Check your schema constraints. This column does not exist in the requested data source."
-                except Exception as e:
-                    result = f"Error executing tool: {e}"
-                messages.append(ToolMessage(content=str(result), tool_call_id=tc["id"]))
-            else:
-                messages.append(ToolMessage(content=f"Error: Unknown tool {name}", tool_call_id=tc["id"]))
-                
-        if final_output is not None:
-            parsed = agent.parse_output(final_output)
-            
-            # Stage 5.5 Stopping Rule Check (Evidence-weighted probabilistic halting)
-            from devops_agent.core.recovery.rca_convergence import RCAConvergenceEvaluator
-            
-            evaluator = RCAConvergenceEvaluator()
-            signal = evaluator.evaluate(
-                scores=parsed.get("updated_hypothesis_scores", {}),
-                evidence_items=parsed.get("evidence_matrix", {}),
-                tool_calls_made=tracker.total_calls,
-                llm_confidence=parsed.get("confidence_level", "INCONCLUSIVE"),
-                llm_investigation_state=parsed.get("investigation_state", "active"),
-            )
-            
-            if signal.state_override is not None:
-                parsed["investigation_state"] = signal.state_override
-                if "investigation_gaps" not in parsed or not isinstance(parsed["investigation_gaps"], list):
-                    parsed["investigation_gaps"] = []
-                parsed["investigation_gaps"].append({
-                    "reason": signal.override_reason,
-                    "entropy": signal.hypothesis_entropy,
-                    "gap": signal.top_hypothesis_gap,
-                    "evidence_depth": signal.evidence_depth,
-                })
-            
-            return parsed

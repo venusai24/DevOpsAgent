@@ -72,6 +72,7 @@ class InvestigationState(BaseState):
 
     # ── Stage 0: Context Assembly ─────────────────────────────────────────────
     declared_topology_graph: dict[str, Any] | None = None
+    discovered_topology_graph: dict[str, Any] | None = None
     component_registry: dict[str, Any] | None = None
     tc_to_operation_map: dict[str, Any] | None = None
     stack_kpi_map: dict[str, Any] | None = None

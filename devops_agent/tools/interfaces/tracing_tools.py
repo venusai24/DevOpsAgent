@@ -3,7 +3,8 @@
 
 import pandas as pd
 from typing import Any
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+from devops_agent.tools.interfaces.validators import parse_timestamp
 
 from devops_agent.core.db.duckdb_client import DuckDBClient
 
@@ -13,10 +14,15 @@ from ..models import ToolContext, ToolMetadata, ToolSchema
 # --- Schemas ---
 
 class QueryAnomalousTracesInput(BaseModel):
-    time_range_start: str = Field(description="Incident start window (ISO 8601 or timestamp string).")
-    time_range_end: str = Field(description="Incident end window (ISO 8601 or timestamp string).")
+    time_range_start: str | int | float = Field(description="Incident start window (ISO 8601 or timestamp string).")
+    time_range_end: str | int | float = Field(description="Incident end window (ISO 8601 or timestamp string).")
     baseline_ref: str = Field(description="Baseline reference key.")
     cmdb_ids: list[str] = Field(description="List of cmdb_ids to check. Must explicitly exist in the topology. Do not hallucinate component IDs.")
+
+    @field_validator("time_range_start", "time_range_end", mode="before")
+    @classmethod
+    def _validate_timestamp(cls, v, info):
+        return parse_timestamp(v, info.field_name)
 
 class BottleneckSummary(BaseModel):
     trace_id: str
@@ -29,9 +35,14 @@ class QueryAnomalousTracesOutput(BaseModel):
     anomalous_traces: list[BottleneckSummary]
 
 class ExtractTraceDependencyEdgesInput(BaseModel):
-    time_range_start: str
-    time_range_end: str
+    time_range_start: str | int | float
+    time_range_end: str | int | float
     cmdb_ids: list[str]
+
+    @field_validator("time_range_start", "time_range_end", mode="before")
+    @classmethod
+    def _validate_timestamp(cls, v, info):
+        return parse_timestamp(v, info.field_name)
 
 class ExtractTraceDependencyEdgesOutput(BaseModel):
     caller_callee_frequencies: dict[str, dict[str, int]] = Field(description="{caller -> {callee -> count}}")
@@ -78,12 +89,9 @@ class QueryAnomalousTracesTool(BaseTool[QueryAnomalousTracesInput, QueryAnomalou
     def schema(self) -> ToolSchema[QueryAnomalousTracesInput]:
         return ToolSchema(input_type=QueryAnomalousTracesInput, output_type=QueryAnomalousTracesOutput)
     async def execute(self, ctx: ToolContext, inputs: QueryAnomalousTracesInput) -> QueryAnomalousTracesOutput:
-        try:
-            t_start = pd.to_datetime(inputs.time_range_start).timestamp()
-            t_end = pd.to_datetime(inputs.time_range_end).timestamp()
-        except ValueError:
-            t_start = float(inputs.time_range_start)
-            t_end = float(inputs.time_range_end)
+        # Inputs are already valid floats due to validator
+        t_start = inputs.time_range_start
+        t_end = inputs.time_range_end
 
         placeholders = ','.join(['?'] * len(inputs.cmdb_ids))
         db = DuckDBClient.get_instance()
@@ -115,12 +123,9 @@ class ExtractTraceDependencyEdgesTool(BaseTool[ExtractTraceDependencyEdgesInput,
     def schema(self) -> ToolSchema[ExtractTraceDependencyEdgesInput]:
         return ToolSchema(input_type=ExtractTraceDependencyEdgesInput, output_type=ExtractTraceDependencyEdgesOutput)
     async def execute(self, ctx: ToolContext, inputs: ExtractTraceDependencyEdgesInput) -> ExtractTraceDependencyEdgesOutput:
-        try:
-            t_start = pd.to_datetime(inputs.time_range_start).timestamp()
-            t_end = pd.to_datetime(inputs.time_range_end).timestamp()
-        except ValueError:
-            t_start = float(inputs.time_range_start)
-            t_end = float(inputs.time_range_end)
+        # Inputs are already valid floats due to validator
+        t_start = inputs.time_range_start
+        t_end = inputs.time_range_end
 
         db = DuckDBClient.get_instance()
         # Self-join on traces to find parent-child relationships

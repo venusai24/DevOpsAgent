@@ -1,9 +1,8 @@
 """LangGraph InvestigationState definition based on ADR-002 Section 6."""
 
 from datetime import datetime
-from typing import Any, Literal, TypedDict
-
-
+from typing import Any, Literal, TypedDict, Annotated
+import operator
 class ComponentInfo(TypedDict):
     name: str
     role: Literal["gateway", "app_server", "database", "cache", "container"]
@@ -58,6 +57,7 @@ class InvestigationState(TypedDict, total=False):
     # ── Stage 0: Context Assembly ─────────────────────────────────────
     component_registry: dict[str, ComponentInfo]
     declared_topology_graph: dict[str, list[str]]
+    discovered_topology_graph: dict[str, list[str]]
     tc_to_operation_map: dict[str, dict[str, Any]]
     stack_kpi_map: list[tuple[tuple[str, str], list[str]]] # Serialized tuple keys
     baseline_registry_ref: str
@@ -92,9 +92,14 @@ class InvestigationState(TypedDict, total=False):
     confidence_level: Literal["HIGH", "MEDIUM", "LOW", "INCONCLUSIVE"] | None
     unconfirmed_links: list[dict[str, Any]]
     final_report: dict[str, Any] | None
+    evidence_log: Annotated[list[dict[str, Any]], operator.add]
+    mismatched_items: list[str]
+    critic_verdicts: Annotated[list[dict[str, Any]], operator.add]
+    current_evidence_items_to_review: list[dict[str, Any]]
     
     # ── Cross-cutting ─────────────────────────────────────────────────
     investigation_state: Literal["active", "AMBIGUOUS_PRE_EVIDENCE", "AMBIGUOUS", "INCONCLUSIVE", "complete"]
+    current_trace_run_id: str | None
     investigation_gaps: list[dict[str, Any]]
     hitl_requests: list[dict[str, Any]]
     hitl_responses: list[dict[str, Any]]
