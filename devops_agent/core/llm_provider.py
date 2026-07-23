@@ -42,12 +42,18 @@ class LLMFactory:
     @staticmethod
     def get_llm(role: Literal["triage", "evidence", "reasoning", "report"]) -> BaseChatModel:
         """
-        Returns a configured Langchain ChatModel using Gemma via Google AI Studio as primary,
-        and a lightweight fallback model on OpenRouter.
+        Returns a configured Langchain ChatModel based on the agent's role.
         """
-        gemini_api_key = os.environ.get("GEMINI_API_KEY")
         google_model = os.environ.get("GOOGLE_MODEL", "gemma-2-27b-it")
+        fallback_model = "gemma-4-26b-a4b"
+        
+        # We fetch the Gemini API keys provided in the .env file
+        gemini_api_key = os.environ.get("GEMINI_API_KEY")
+        gemini_api_key_backup = os.environ.get("GEMINI_API_KEY_BACKUP")
+        
         openrouter_api_key = os.environ.get("OPENROUTER_KEY")
+        openrouter_api_key_backup = os.environ.get("OPENROUTER_KEY_BACKUP")
+        openrouter_api_key_backup_2 = os.environ.get("OPENROUTER_KEY_BACKUP_2")
         
         if not gemini_api_key:
             logger.warning("GEMINI_API_KEY is missing from environment variables!")
@@ -60,29 +66,63 @@ class LLMFactory:
         primary_llm = ChatGoogleGenerativeAI(
             model=google_model,
             google_api_key=gemini_api_key,
-            temperature=0.0,
-            max_retries=3,
-            timeout=60,
+            temperature=0.0, # Zero temperature for strict deterministic RCA
+            max_retries=3,   # Fail quickly on 503 to trigger fallback
+            timeout=240,     # Increased timeout for large contexts
         )
         
-        # Fallback Model 1: OLMo 3 32B Think via OpenRouter
-        olmo_llm = ChatOpenAI(
-            model="allenai/olmo-3-32b-think",
-            api_key=openrouter_api_key,
-            base_url="https://openrouter.ai/api/v1",
-            temperature=0.0,
-            max_retries=1,
-            timeout=30,
-        )
+        fallbacks = []
         
-        # Fallback Model 2: Lightweight Llama 3.1 8B Instruct via OpenRouter
-        lightweight_fallback_llm = ChatOpenAI(
-            model="meta-llama/llama-3.1-8b-instruct",
-            api_key=openrouter_api_key,
-            base_url="https://openrouter.ai/api/v1",
-            temperature=0.0,
-            max_retries=3,
-            timeout=60,
-        )
+        # Add primary model with backup key
+        if gemini_api_key_backup:
+            fallbacks.append(ChatGoogleGenerativeAI(
+                model=google_model,
+                google_api_key=gemini_api_key_backup,
+                temperature=0.0,
+                max_retries=2,
+                timeout=240,
+            ))
+            
+        # Add secondary Gemini model with primary key
+        if gemini_api_key:
+            fallbacks.append(ChatGoogleGenerativeAI(
+                model=fallback_model,
+                google_api_key=gemini_api_key,
+                temperature=0.0,
+                max_retries=2,
+                timeout=240,
+            ))
+            
+        # Add secondary Gemini model with backup key
+        if gemini_api_key_backup:
+            fallbacks.append(ChatGoogleGenerativeAI(
+                model=fallback_model,
+                google_api_key=gemini_api_key_backup,
+                temperature=0.0,
+                max_retries=2,
+                timeout=240,
+            ))
+            
+        # Add OpenRouter fallback models for each available key
+        openrouter_keys = [k for k in [openrouter_api_key, openrouter_api_key_backup, openrouter_api_key_backup_2] if k]
+        for or_key in openrouter_keys:
+            # Fallback Model 1: OLMo 3 32B Think via OpenRouter
+            fallbacks.append(ChatOpenAI(
+                model="allenai/olmo-3-32b-think",
+                api_key=or_key,
+                base_url="https://openrouter.ai/api/v1",
+                temperature=0.0,
+                max_retries=2,
+                timeout=240,
+            ))
+            # Fallback Model 2: Lightweight Llama 3.1 8B Instruct via OpenRouter
+            fallbacks.append(ChatOpenAI(
+                model="meta-llama/llama-3.1-8b-instruct",
+                api_key=or_key,
+                base_url="https://openrouter.ai/api/v1",
+                temperature=0.0,
+                max_retries=2,
+                timeout=240,
+            ))
         
-        return FallbackModelWrapper(primary_llm, [olmo_llm, lightweight_fallback_llm])
+        return FallbackModelWrapper(primary_llm, fallbacks)
