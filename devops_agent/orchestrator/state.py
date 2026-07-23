@@ -80,6 +80,7 @@ class InvestigationState(TypedDict, total=False):
     
     # ── Stages 5–8: RCA ───────────────────────────────────────────────
     evidence_matrix: dict[str, list[EvidenceItem]]
+    evidence_items: list[dict[str, Any]]
     updated_hypothesis_scores: dict[str, float]
     eliminated_hypotheses: list[dict[str, Any]]
     surviving_hypotheses: list[str]

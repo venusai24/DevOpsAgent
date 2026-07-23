@@ -11,6 +11,11 @@ def parse_timestamp(value: str | int | float, field_name: str) -> float:
     """Parse a string or float into a Unix timestamp (seconds)."""
     if isinstance(value, (int, float)):
         return float(value)
+        text_value = str(value).strip()
+        try:
+            return float(text_value)
+        except ValueError:
+            pass
     try:
         return datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp()
     except ValueError:

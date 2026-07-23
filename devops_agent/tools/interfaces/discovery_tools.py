@@ -1,5 +1,7 @@
 """Discovery Tools (Tools 2 and 3)."""
 
+import re
+from typing import Any
 from pydantic import BaseModel, Field, field_validator
 from devops_agent.tools.interfaces.validators import parse_timestamp
 
@@ -13,7 +15,7 @@ from .baseline_tools import _BASELINE_STORE
 
 class QueryAnomalyOutput(BaseModel):
     affected_components: list[str] = Field(description="List of components (cmdb_id or tc) that breached the threshold.")
-    anomalous_metrics_by_component: dict[str, list[str]] = Field(description="Mapping of component to a list of breaching metrics/logs.")
+    anomalous_metrics_by_component: dict[str, Any] = Field(description="Mapping of component to a list of breaching metrics/logs.")
     t0_sources: list[str] = Field(description="Components that breached first temporally.")
     no_anomalies_detected: bool = Field(description="True if no components breached the criteria.")
 
@@ -66,6 +68,46 @@ class RunConnectedComponentAnalysisOutput(BaseModel):
     primary_cluster: list[str] = Field(description="The largest connected graph of affected components.")
     concurrent_incident_clusters: list[list[str]] = Field(description="Disconnected sub-graphs experiencing simultaneous anomalies.")
     boundary_ambiguous: list[str] = Field(description="Components on the edge of the blast radius.")
+
+def compress_by_blast_radius(anomalous_kpis: dict[str, list[str]]) -> dict[str, list[str]]:
+    """Groups metrics by the exact components they affect, and compacts common prefixes."""
+    from collections import defaultdict
+    import re
+
+    # 1. Invert mapping: metric -> list of components
+    inverted = defaultdict(list)
+    for comp, metrics in anomalous_kpis.items():
+        for m in metrics:
+            inverted[m].append(comp)
+
+    # 2. Group metrics that affect the exact same components
+    comp_to_metrics = defaultdict(list)
+    for metric, comps in inverted.items():
+        comp_key = ",".join(sorted(comps))
+        comp_to_metrics[comp_key].append(metric)
+
+    # 3. Compact the metric strings using prefix bracket notation
+    final_map = {}
+    for comp_key, metrics in comp_to_metrics.items():
+        prefix_groups = defaultdict(list)
+        for m in metrics:
+            match = re.search(r'(.*)([_|-])(.*)', m)
+            if match:
+                prefix, sep, suffix = match.groups()
+                prefix_groups[prefix + sep].append(suffix)
+            else:
+                prefix_groups[''].append(m)
+                
+        compacted = []
+        for prefix, suffixes in prefix_groups.items():
+            if len(suffixes) > 1:
+                compacted.append(f"{prefix}[{', '.join(suffixes)}]")
+            else:
+                compacted.append(f"{prefix}{suffixes[0]}")
+                
+        final_map[comp_key] = compacted
+        
+    return final_map
 
 class QueryMetricsTool(BaseTool[QueryMetricsInput, QueryAnomalyOutput]):
     @property
@@ -120,9 +162,12 @@ class QueryMetricsTool(BaseTool[QueryMetricsInput, QueryAnomalyOutput]):
                     t0_components.add(cmdb_id)
 
         affected = list(anomalous_kpis.keys())
+        
+        compressed = compress_by_blast_radius(anomalous_kpis)
+        
         return QueryAnomalyOutput(
             affected_components=affected,
-            anomalous_metrics_by_component=anomalous_kpis,
+            anomalous_metrics_by_component=compressed,
             t0_sources=list(t0_components),
             no_anomalies_detected=len(affected) == 0
         )
@@ -182,9 +227,10 @@ class QueryAppStatsTool(BaseTool[QueryAppStatsInput, QueryAnomalyOutput]):
                         t0_components.add(tc)
 
         affected = list(anomalous_tcs.keys())
+        compressed = compress_by_blast_radius(anomalous_tcs)
         return QueryAnomalyOutput(
             affected_components=affected,
-            anomalous_metrics_by_component=anomalous_tcs,
+            anomalous_metrics_by_component=compressed,
             t0_sources=list(t0_components),
             no_anomalies_detected=len(affected) == 0
         )
@@ -228,9 +274,10 @@ class QueryLogsTool(BaseTool[QueryLogsInput, QueryAnomalyOutput]):
                 t0_components.add(cmdb_id)
                 
         affected = list(anomalous_cmdb.keys())
+        compressed = compress_by_blast_radius(anomalous_cmdb)
         return QueryAnomalyOutput(
             affected_components=affected,
-            anomalous_metrics_by_component=anomalous_cmdb,
+            anomalous_metrics_by_component=compressed,
             t0_sources=list(t0_components),
             no_anomalies_detected=len(affected) == 0
         )
@@ -274,9 +321,10 @@ class QueryTracesTool(BaseTool[QueryTracesInput, QueryAnomalyOutput]):
                 t0_components.add(cmdb_id)
                 
         affected = list(anomalous_cmdb.keys())
+        compressed = compress_by_blast_radius(anomalous_cmdb)
         return QueryAnomalyOutput(
             affected_components=affected,
-            anomalous_metrics_by_component=anomalous_cmdb,
+            anomalous_metrics_by_component=compressed,
             t0_sources=list(t0_components),
             no_anomalies_detected=len(affected) == 0
         )

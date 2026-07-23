@@ -27,8 +27,11 @@ class RCAState(InvestigationState):
     rca_fingerprints: list[str]
     rca_hypothesis_calls: dict[str, int]
     rca_hypothesis_scores: dict[str, list[float]]
+    rca_completed: bool
 
 def _global_stopping_condition_met(scores: dict[str, float], surviving: list[str]) -> bool:
+    if not scores:
+        return False
     if not surviving:
         return True
     top_score = max([scores.get(h, 0.0) for h in surviving] + [0.0])
@@ -144,13 +147,11 @@ async def rca_tools_node(state: RCAState, config: RunnableConfig) -> dict[str, A
     rca_hypothesis_calls = state.get("rca_hypothesis_calls", {})
     
     surviving = list(state.get("surviving_hypotheses", []))
+    if not surviving:
+        surviving = [h.get("name") for h in state.get("ranked_hypotheses", []) if isinstance(h, dict) and h.get("name")]
     
-    evidence_log = state.get("evidence_log", [])
-    if not evidence_log:
-        evidence_log = []
-    else:
-        evidence_log = list(evidence_log)
-        
+    new_evidence = []
+    
     eliminated_hypotheses = list(state.get("eliminated_hypotheses", []))
     
     for tc in last_msg.tool_calls:
@@ -159,7 +160,8 @@ async def rca_tools_node(state: RCAState, config: RunnableConfig) -> dict[str, A
             final_output = tc["args"]
             parsed = final_output.copy()
             parsed["current_node"] = "rca"
-            parsed["evidence_log"] = evidence_log
+            parsed.pop("evidence_log", None)
+            parsed["rca_completed"] = True
             return parsed
             
         elif name in tool_map:
@@ -185,7 +187,7 @@ async def rca_tools_node(state: RCAState, config: RunnableConfig) -> dict[str, A
                     "investigation_state": "AMBIGUOUS",
                     "current_node": "rca",
                     "investigation_gaps": [{"reason": "Loop prevention triggered in RCA"}],
-                    "evidence_log": evidence_log
+                    "rca_completed": True
                 }
                 return parsed
                 
@@ -208,7 +210,7 @@ async def rca_tools_node(state: RCAState, config: RunnableConfig) -> dict[str, A
                     "investigation_state": "AMBIGUOUS",
                     "current_node": "rca",
                     "investigation_gaps": [{"reason": "Budget exhausted in RCA"}],
-                    "evidence_log": evidence_log
+                    "rca_completed": True
                 }
                 return parsed
                 
@@ -216,11 +218,11 @@ async def rca_tools_node(state: RCAState, config: RunnableConfig) -> dict[str, A
                 result = await tool.ainvoke(tc["args"], config=config)
                 # Accumulate evidence
                 if hasattr(result, "model_dump"):
-                    evidence_log.append(result.model_dump())
+                    new_evidence.append(result.model_dump())
                 elif hasattr(result, "dict"):
-                    evidence_log.append(result.dict())
+                    new_evidence.append(result.dict())
                 elif isinstance(result, dict):
-                    evidence_log.append(result)
+                    new_evidence.append(result)
             except KeyError as e:
                 result = f"KeyError: {e}. Check your schema constraints. This column does not exist in the requested data source."
             except Exception as e:
@@ -235,7 +237,7 @@ async def rca_tools_node(state: RCAState, config: RunnableConfig) -> dict[str, A
         "rca_duplicates": rca_duplicates,
         "rca_fingerprints": rca_fingerprints,
         "rca_hypothesis_calls": rca_hypothesis_calls,
-        "evidence_log": evidence_log,
+        "evidence_log": new_evidence,
         "surviving_hypotheses": surviving,
         "eliminated_hypotheses": eliminated_hypotheses
     }
@@ -258,16 +260,21 @@ def rca_should_continue(state: RCAState) -> str:
         
     for tc in last_msg.tool_calls:
         if tc["name"] == "SubmitEvidenceReport":
-            return END
+            return "rca_tools_node"
             
     if state.get("rca_duplicates", 0) >= 3:
-        return END
+        return "rca_tools_node"
         
     rca_hypothesis_calls = state.get("rca_hypothesis_calls", {})
     if sum(rca_hypothesis_calls.values()) > 15:
-        return END
+        return "rca_tools_node"
         
     return "rca_tools_node"
+
+def rca_tools_condition(state: RCAState) -> str:
+    if state.get("rca_completed"):
+        return END
+    return "rca_llm_node"
 
 def build_rca_subgraph():
     builder = StateGraph(RCAState)
@@ -285,6 +292,13 @@ def build_rca_subgraph():
         }
     )
     
-    builder.add_edge("rca_tools_node", "rca_llm_node")
+    builder.add_conditional_edges(
+        "rca_tools_node",
+        rca_tools_condition,
+        {
+            END: END,
+            "rca_llm_node": "rca_llm_node"
+        }
+    )
     
     return builder.compile()

@@ -190,8 +190,8 @@ class QueryMetricsTool(BaseTool[QueryMetricsInput, QueryMetricsOutput]):
             global_trend = "flat"
                 
         summary = f"{resolved_kpi} ({len(vals)} pts, max: {max(vals):.2f}, min: {min(vals):.2f}, max_z: {max_z:.2f})"
-        
-        return QueryMetricsOutput(evidence_id="ev_metrics_01", hypothesis_id=inputs.hypothesis_id, cmdb_id=inputs.cmdb_id, max_z_score=max_z, trend=global_trend, raw_data_points_summary=summary, resolution_note=note)
+        evidence_id = f"ev_metric_{inputs.cmdb_id}_{resolved_kpi.replace('.', '_')}"
+        return QueryMetricsOutput(evidence_id=evidence_id, hypothesis_id=inputs.hypothesis_id, cmdb_id=inputs.cmdb_id, max_z_score=max_z, trend=global_trend, raw_data_points_summary=summary, resolution_note=note)
 
 class QueryLogsTool(BaseTool[QueryLogsInput, QueryLogsOutput]):
     @property
@@ -253,8 +253,10 @@ class QueryLogsTool(BaseTool[QueryLogsInput, QueryLogsOutput]):
             rate_pct = 100.0
             
         samples = df['value'].head(5).tolist()
+        pattern_tag = (pattern or "all").replace(" ", "_")
+        evidence_id = f"ev_log_{inputs.cmdb_id}_{pattern_tag}"
         return QueryLogsOutput(
-            evidence_id="ev_logs_01", 
+            evidence_id=evidence_id, 
             hypothesis_id=inputs.hypothesis_id, 
             cmdb_id=inputs.cmdb_id, 
             match_count=match_count,

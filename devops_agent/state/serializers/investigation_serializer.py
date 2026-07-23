@@ -65,6 +65,7 @@ class InvestigationSerializer(BaseSerializer[InvestigationState]):
             "topology_manifest_version": state.topology_manifest_version,
             # Stage 0
             "declared_topology_graph": state.declared_topology_graph,
+            "discovered_topology_graph": state.discovered_topology_graph,
             "component_registry": state.component_registry,
             "tc_to_operation_map": state.tc_to_operation_map,
             "stack_kpi_map": state.stack_kpi_map,
@@ -152,6 +153,7 @@ class InvestigationSerializer(BaseSerializer[InvestigationState]):
             stage0_cache_key=data.get("stage0_cache_key"),
             topology_manifest_version=data.get("topology_manifest_version"),
             declared_topology_graph=data.get("declared_topology_graph"),
+            discovered_topology_graph=data.get("discovered_topology_graph"),
             component_registry=data.get("component_registry"),
             tc_to_operation_map=data.get("tc_to_operation_map"),
             stack_kpi_map=data.get("stack_kpi_map"),

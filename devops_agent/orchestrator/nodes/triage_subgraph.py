@@ -25,6 +25,7 @@ class TriageState(InvestigationState):
     triage_messages: Annotated[list[AnyMessage], operator.add]
     triage_duplicates: int
     triage_fingerprints: list[str]
+    triage_completed: bool
 
 async def triage_llm_node(state: TriageState, config: RunnableConfig) -> dict[str, Any]:
     agent = TriageAgent()
@@ -80,7 +81,9 @@ CONSTRAINTS & RULES
     llm = LLMFactory.get_llm("triage").bind_tools(tools + [SubmitTriageReport])
     
     response = await llm.ainvoke(messages, config=config)
-    return {"triage_messages": [response] if not state.get("triage_messages") else messages + [response]}
+    if not state.get("triage_messages"):
+        return {"triage_messages": messages + [response]}
+    return {"triage_messages": [response]}
 
 async def triage_tools_node(state: TriageState, config: RunnableConfig) -> dict[str, Any]:
     messages = state.get("triage_messages", [])
@@ -126,6 +129,7 @@ async def triage_tools_node(state: TriageState, config: RunnableConfig) -> dict[
         if name == "SubmitTriageReport":
             final_output = tc["args"]
             parsed = agent.parse_output(final_output)
+            parsed["triage_completed"] = True
             # Add an empty state override for clean return mapping
             return parsed
             
@@ -149,7 +153,8 @@ async def triage_tools_node(state: TriageState, config: RunnableConfig) -> dict[
                     "investigation_cluster": [],
                     "ranked_hypotheses": [],
                     "investigation_state": "AMBIGUOUS_PRE_EVIDENCE",
-                    "current_node": "triage"
+                    "current_node": "triage",
+                    "triage_completed": True
                 }
                 return parsed
                 
@@ -183,13 +188,18 @@ def triage_should_continue(state: TriageState) -> str:
         
     for tc in last_msg.tool_calls:
         if tc["name"] == "SubmitTriageReport":
-            return END
+            return "triage_tools_node"
             
     # Loop break check
     if state.get("triage_duplicates", 0) >= 3:
-        return END
+        return "triage_tools_node"
         
     return "triage_tools_node"
+
+def triage_tools_condition(state: TriageState) -> str:
+    if state.get("triage_completed"):
+        return END
+    return "triage_llm_node"
 
 def build_triage_subgraph():
     builder = StateGraph(TriageState)
@@ -207,6 +217,13 @@ def build_triage_subgraph():
         }
     )
     
-    builder.add_edge("triage_tools_node", "triage_llm_node")
+    builder.add_conditional_edges(
+        "triage_tools_node",
+        triage_tools_condition,
+        {
+            END: END,
+            "triage_llm_node": "triage_llm_node"
+        }
+    )
     
     return builder.compile()
