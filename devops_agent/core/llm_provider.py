@@ -45,7 +45,7 @@ class LLMFactory:
         Returns a configured Langchain ChatModel based on the agent's role.
         """
         google_model = os.environ.get("GOOGLE_MODEL", "gemma-2-27b-it")
-        fallback_model = "gemma-4-26b-a4b"
+        fallback_model = "gemma-2-9b-it"
         
         # We fetch the Gemini API keys provided in the .env file
         gemini_api_key = os.environ.get("GEMINI_API_KEY")
@@ -106,18 +106,27 @@ class LLMFactory:
         # Add OpenRouter fallback models for each available key
         openrouter_keys = [k for k in [openrouter_api_key, openrouter_api_key_backup, openrouter_api_key_backup_2] if k]
         for or_key in openrouter_keys:
-            # Fallback Model 1: OLMo 3 32B Think via OpenRouter
+            # Fallback Model 1: Llama 3.1 70B via OpenRouter (supports parallel tool calls)
             fallbacks.append(ChatOpenAI(
-                model="allenai/olmo-3-32b-think",
+                model="meta-llama/llama-3.1-70b-instruct",
                 api_key=or_key,
                 base_url="https://openrouter.ai/api/v1",
                 temperature=0.0,
                 max_retries=2,
                 timeout=240,
             ))
-            # Fallback Model 2: Lightweight Llama 3.1 8B Instruct via OpenRouter
+            # Fallback Model 2: GPT-OSS 20B Free via OpenRouter
             fallbacks.append(ChatOpenAI(
-                model="meta-llama/llama-3.1-8b-instruct",
+                model="openai/gpt-oss-20b:free",
+                api_key=or_key,
+                base_url="https://openrouter.ai/api/v1",
+                temperature=0.0,
+                max_retries=2,
+                timeout=240,
+            ))
+            # Fallback Model 3: Mistral Nemo via OpenRouter
+            fallbacks.append(ChatOpenAI(
+                model="mistralai/mistral-nemo",
                 api_key=or_key,
                 base_url="https://openrouter.ai/api/v1",
                 temperature=0.0,

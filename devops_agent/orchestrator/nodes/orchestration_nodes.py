@@ -32,20 +32,50 @@ def deterministic_scoring_node(state: InvestigationState) -> dict[str, Any]:
     
     scorer = DeterministicScorer()
     
-    hypotheses = state.get("surviving_hypotheses", [])
+    hypotheses_raw = state.get("surviving_hypotheses", [])
+    ranked = state.get("ranked_hypotheses", [])
+    
+    hypotheses = []
+    for h in hypotheses_raw:
+        if isinstance(h, str):
+            hypotheses.append(h)
+        elif isinstance(h, dict):
+            name = h.get("name") or h.get("hypothesis") or h.get("id")
+            if name:
+                hypotheses.append(name)
+                
+    if not hypotheses and ranked:
+        for h in ranked:
+            if isinstance(h, dict):
+                name = h.get("name") or h.get("hypothesis") or h.get("id")
+                if name:
+                    hypotheses.append(name)
+            elif isinstance(h, str):
+                hypotheses.append(h)
+                
     if not hypotheses:
-        # Default to some hypotheses if state is not populated well
         hypotheses = ["hypothesis_1", "hypothesis_2"]
         
     evidence_items = state.get("evidence_items", [])
     evidence_log = state.get("evidence_log", [])
     critic_verdicts = state.get("critic_verdicts", [])
     
+    prior_scores = state.get("updated_hypothesis_scores")
+    if not prior_scores or not isinstance(prior_scores, dict):
+        prior_scores = {}
+        if ranked:
+            for h in ranked:
+                if isinstance(h, dict):
+                    name = h.get("name") or h.get("hypothesis") or h.get("id")
+                    score = h.get("probability") or h.get("confidence") or h.get("score") or 0.0
+                    if name:
+                        prior_scores[name] = float(score)
     updated_scores, mismatched = scorer.score(
         hypotheses=hypotheses,
         evidence_items=evidence_items,
         evidence_log=evidence_log,
-        critic_verdicts=critic_verdicts
+        critic_verdicts=critic_verdicts,
+        prior_scores=prior_scores
     )
     
     # Calculate mismatch ratio

@@ -60,11 +60,20 @@ class DeterministicScorer:
         hypotheses: List[str],
         evidence_items: List[Dict[str, Any]],
         evidence_log: List[Dict[str, Any]],
-        critic_verdicts: List[Dict[str, Any]] = None
+        critic_verdicts: List[Dict[str, Any]] = None,
+        prior_scores: Dict[str, float] = None
     ) -> Tuple[Dict[str, float], List[str]]:
         
         mismatched_items = []
         hypothesis_log_odds = {h: 0.0 for h in hypotheses}
+        if prior_scores:
+            for h in hypotheses:
+                prob = prior_scores.get(h, 0.0)
+                if prob > 0:
+                    hypothesis_log_odds[h] = math.log(prob)
+                else:
+                    hypothesis_log_odds[h] = -20.0
+
         
         # Build lookup for critic verdicts
         critic_lookup = {}
