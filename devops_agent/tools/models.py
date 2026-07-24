@@ -80,8 +80,15 @@ class ToolResult(Generic[T]):
 
 @dataclass
 class ToolRetryPolicy:
-    """Configurable retry policy per tool execution."""
+    """Configurable retry policy per tool execution.
+
+    Only *transient* infrastructure errors (timeouts, network blips) should
+    be retried.  Semantic errors such as METRIC_NOT_FOUND or VALIDATION_ERROR
+    are deterministic — retrying them wastes time and produces log noise.
+    """
     max_attempts: int = 3
     base_backoff_ms: int = 500
     max_backoff_ms: int = 5000
-    retryable_error_codes: set[str] = field(default_factory=set)
+    retryable_error_codes: set[str] = field(
+        default_factory=lambda: {"TIMEOUT_ERROR", "NETWORK_ERROR"}
+    )

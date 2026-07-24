@@ -1,12 +1,14 @@
 """Evidence Gathering Tools (Tools 4 and 5)."""
 
 
-import pandas as pd
-from pydantic import BaseModel, Field, field_validator
-from langchain_core.tools import ToolException
 from difflib import SequenceMatcher, get_close_matches
 
+import pandas as pd
+from langchain_core.tools import ToolException
+from pydantic import BaseModel, Field, field_validator
+
 from devops_agent.core.db.duckdb_client import DuckDBClient
+from devops_agent.tools.exceptions import ToolMetricNotFoundError
 from devops_agent.tools.interfaces.validators import parse_timestamp
 
 from ..base import BaseTool
@@ -97,9 +99,12 @@ def resolve_kpi(cmdb_id: str, kpi_name: str, cmdb_baselines: dict) -> tuple[str,
         return resolved, f"kpi_name '{kpi_name}' auto-resolved to '{resolved}' (similarity {best_score:.2f})"
 
     suggestions = get_close_matches(normalized, by_lower.keys(), n=5, cutoff=SUGGESTION_CUTOFF) or list(by_lower.keys())[:5]
-    raise ToolException(
+    # Use ToolMetricNotFoundError (error_code="METRIC_NOT_FOUND") so the executor
+    # treats this as a non-retryable semantic failure and stops immediately.
+    raise ToolMetricNotFoundError(
         f"Metric '{kpi_name}' not found for {cmdb_id}. "
-        f"Available metrics for this host: {[by_lower[s] for s in suggestions]}"
+        f"Call list_available_metrics_for_component first to get exact names. "
+        f"Closest available metrics: {[by_lower[s] for s in suggestions]}"
     )
 
 # --- Implementations ---
@@ -154,10 +159,8 @@ class QueryMetricsTool(BaseTool[QueryMetricsInput, QueryMetricsOutput]):
         t_end = inputs.time_window_end
             
         db = DuckDBClient.get_instance()
-        global_max_z = 0.0
         global_trend = "flat"
-        global_summary_parts = []
-        
+
         cmdb_baselines = baseline_data.get(inputs.cmdb_id, {})
         cmdb_baseline = cmdb_baselines[resolved_kpi]
         mean = float(cmdb_baseline['mean'])
@@ -264,4 +267,64 @@ class QueryLogsTool(BaseTool[QueryLogsInput, QueryLogsOutput]):
             match_rate_pct=rate_pct,
             note=note,
             sample_lines=samples
+        )
+
+# ── Fix 2: Guard-rail tool so the LLM can discover exact metric names ───────
+
+class ListAvailableMetricsInput(BaseModel):
+    baseline_ref: str = Field(description="Baseline reference key from compute_baseline_statistics.")
+    cmdb_id: str = Field(description="The component to list metrics for. Must be an exact cmdb_id.")
+
+class ListAvailableMetricsOutput(BaseModel):
+    cmdb_id: str = Field(description="The queried component.")
+    available_metrics: list[str] = Field(
+        description=(
+            "Exact kpi_name strings that exist for this component. "
+            "Use one of these verbatim as the kpi_name argument to query_metrics_for_hypothesis."
+        )
+    )
+    metric_count: int = Field(description="Total number of available metrics.")
+
+class ListAvailableMetricsTool(BaseTool[ListAvailableMetricsInput, ListAvailableMetricsOutput]):
+    """Guard-rail tool: returns the exact kpi_name strings available for a component.
+
+    The RCA LLM MUST call this before query_metrics_for_hypothesis whenever it
+    wants to query a metric by a generic name (e.g. 'cpu', 'disk').  The returned
+    names are the verbatim strings required by that tool.
+    """
+
+    @property
+    def metadata(self) -> ToolMetadata:
+        return ToolMetadata(
+            name="list_available_metrics_for_component",
+            description=(
+                "Returns the exact kpi_name strings available in the baseline for a given cmdb_id. "
+                "ALWAYS call this before query_metrics_for_hypothesis if you are not certain of the "
+                "exact metric name. Never use generic names like 'cpu' or 'disk' — they will fail."
+            ),
+            version="1.0.0"
+        )
+
+    @property
+    def schema(self) -> ToolSchema[ListAvailableMetricsInput]:
+        return ToolSchema(
+            input_type=ListAvailableMetricsInput,
+            output_type=ListAvailableMetricsOutput
+        )
+
+    async def execute(
+        self, ctx: ToolContext, inputs: ListAvailableMetricsInput
+    ) -> ListAvailableMetricsOutput:
+        baseline_data = _BASELINE_STORE.get(inputs.baseline_ref, {}).get("container_metrics", {})
+        host_metrics = baseline_data.get(inputs.cmdb_id)
+        if host_metrics is None:
+            raise ToolException(
+                f"Unknown cmdb_id '{inputs.cmdb_id}'. "
+                f"Known components: {list(baseline_data.keys())[:10]}"
+            )
+        metric_names = list(host_metrics.keys())
+        return ListAvailableMetricsOutput(
+            cmdb_id=inputs.cmdb_id,
+            available_metrics=metric_names,
+            metric_count=len(metric_names),
         )

@@ -1,8 +1,10 @@
 """LangGraph InvestigationState definition based on ADR-002 Section 6."""
 
-from datetime import datetime
-from typing import Any, Literal, TypedDict, Annotated
 import operator
+from datetime import datetime
+from typing import Annotated, Any, Literal, TypedDict
+
+
 class ComponentInfo(TypedDict):
     name: str
     role: Literal["gateway", "app_server", "database", "cache", "container"]
@@ -60,6 +62,9 @@ class InvestigationState(TypedDict, total=False):
     discovered_topology_graph: dict[str, list[str]]
     tc_to_operation_map: dict[str, dict[str, Any]]
     stack_kpi_map: list[tuple[tuple[str, str], list[str]]] # Serialized tuple keys
+    # Maps each cmdb_id to the exact kpi_name strings present in its baseline.
+    # Populated in context_assembly; consumed by the RCA LLM to avoid guessing metric names.
+    component_kpi_map: dict[str, list[str]]
     baseline_registry_ref: str
     stage_0_gaps: list[dict[str, Any]]
     
@@ -104,7 +109,8 @@ class InvestigationState(TypedDict, total=False):
     investigation_gaps: list[dict[str, Any]]
     hitl_requests: list[dict[str, Any]]
     hitl_responses: list[dict[str, Any]]
-    hitl_resume_action: Literal["RESTART_TRIAGE", "RESTART_EVIDENCE", "RESTART_REASONING", "RESTART_CONTEXT", "FORCE_CLOSE"] | None
+    hitl_resume_action: Literal["RESTART_TRIAGE", "RESTART_EVIDENCE", "RESTART_REASONING", "RESTART_CONTEXT", "FORCE_CLOSE", "RESTART_RCA"] | None
+    hitl_human_hint: str | None  # Free-text hint from the human supervisor
     current_node: str
     error_log: list[dict[str, Any]]
     token_spend: dict[str, int]

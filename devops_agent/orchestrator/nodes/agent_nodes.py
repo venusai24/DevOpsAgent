@@ -1,31 +1,21 @@
-import asyncio
-import json
 import os
 import uuid
 from typing import Any
 
-from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
 
 from devops_agent.core.db.duckdb_client import DuckDBClient
-from devops_agent.core.llm_provider import LLMFactory
-from devops_agent.core.recovery.loop_prevention.stage_progress_tracker import StageProgressTracker
-from devops_agent.tools.executor import ToolExecutor
 from devops_agent.tools.interfaces.baseline_tools import (
     ComputeBaselineInput,
     ComputeBaselineStatisticsTool,
 )
-from devops_agent.tools.langchain_adapter import wrap_tools
-from devops_agent.tools.models import ToolContext
-from devops_agent.tools.registry import get_registry
 from devops_agent.tools.interfaces.tracing_tools import (
     ExtractTraceDependencyEdgesInput,
     ExtractTraceDependencyEdgesTool,
 )
+from devops_agent.tools.models import ToolContext
 
 from ..agents.context_assembler import ContextAssemblerService
-from ..agents.schemas import TriageAgentOutput
-from ..agents.triage_agent import TriageAgent
 from ..state import InvestigationState
 
 
@@ -124,13 +114,15 @@ async def context_assembler_agent_node(state: InvestigationState, config: Runnab
             
             for cid in cmdb_ids:
                 cid_kpis = df_kpi_all[df_kpi_all['cmdb_id'] == cid]['kpi_name'].tolist()
-                categories = {}
+                categories: dict[str, int] = {}
                 for k in cid_kpis:
                     cat = classify_kpi(k)
                     categories[cat] = categories.get(cat, 0) + 1
-                    
+
                 kpi_map[cid] = {
-                    "available_categories": categories
+                    # Exact verbatim names the LLM must use with query_metrics_for_hypothesis
+                    "available_metrics": cid_kpis,
+                    "available_categories": categories,
                 }
                 
         if state.get("app_stats_path"):
@@ -192,10 +184,19 @@ async def context_assembler_agent_node(state: InvestigationState, config: Runnab
     service = ContextAssemblerService()
     parsed = service.assemble(state, cmdb_ids, tc_values)
     parsed["baseline_registry_ref"] = baseline_ref
-    
+
+    # Build a flat component_kpi_map: cmdb_id -> list[exact metric names]
+    # This is the authoritative metric registry for the RCA LLM — it must
+    # use only names from this map when calling query_metrics_for_hypothesis.
+    parsed["component_kpi_map"] = {
+        cid: info["available_metrics"]
+        for cid, info in kpi_map.items()
+        if "available_metrics" in info
+    }
+
     if dependencies_unknown and 'discovered_topology' in locals():
         parsed["discovered_topology_graph"] = discovered_topology
-    
+
     return parsed
 
 

@@ -32,3 +32,12 @@ class ToolNotFoundError(ToolError):
     """Raised when looking up an unregistered tool."""
     def __init__(self, tool_name: str):
         super().__init__(f"Tool '{tool_name}' not found in registry", "TOOL_NOT_FOUND")
+
+class ToolMetricNotFoundError(ToolError):
+    """Raised when a requested KPI/metric name does not exist for a given component.
+
+    This is a *semantic* error — the metric name is wrong, not a transient
+    infrastructure failure — so it must NOT be retried.
+    """
+    def __init__(self, message: str):
+        super().__init__(message, "METRIC_NOT_FOUND")

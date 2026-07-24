@@ -1,9 +1,9 @@
 import json
-import uuid
-from typing import Any, Annotated, TypedDict
 import operator
+import uuid
+from typing import Annotated, Any
 
-from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage, AnyMessage
+from langchain_core.messages import AnyMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, StateGraph
 
@@ -13,9 +13,10 @@ from devops_agent.tools.langchain_adapter import wrap_tools
 from devops_agent.tools.models import ToolContext
 from devops_agent.tools.registry import get_registry
 
-from ..state import InvestigationState
 from ..agents.rca_agent import RCAAgent
 from ..agents.schemas import SubmitEvidenceReport as SubmitEvidenceReportSchema
+from ..state import InvestigationState
+
 
 class SubmitEvidenceReport(SubmitEvidenceReportSchema):
     """Submit the evidence classification report. Call this ONLY when you have isolated the root cause or gathered sufficient evidence."""
@@ -58,6 +59,17 @@ CONTEXT: DATA SOURCES & SCHEMAS
 3. Logs: NO 'kpi_name'. Use 'log_name'.
 4. Traces: NO 'kpi_name'.
 
+CRITICAL CONSTRAINT: METRIC NAMES
+--------
+The 'component_kpi_map' in your context contains the ONLY valid kpi_name strings.
+Examples of VALID names: 'Mysql-MySQL_3306_Select Scan', 'OSLinux-OSLinux_FILESYSTEM_-_FSUsedSpace'
+Examples of INVALID names (WILL ALWAYS FAIL): 'cpu', 'disk', 'memory', 'network'
+
+Workflow for querying metrics:
+  1. Check 'component_kpi_map' in your context for the target cmdb_id.
+  2. If the exact name is not obvious, call list_available_metrics_for_component FIRST.
+  3. Only then call query_metrics_for_hypothesis with the exact name from step 1 or 2.
+
 CONSTRAINTS & RULES
 --------
 1. NO HALLUCINATION: Never assume a column exists if it is not explicitly listed.
@@ -84,8 +96,9 @@ CONSTRAINTS & RULES
     )
     
     tool_names = [
-        "query_anomalous_traces", "build_span_tree_summary", 
-        "query_metrics_for_hypothesis", "query_logs_for_hypothesis", 
+        "list_available_metrics_for_component",
+        "query_anomalous_traces", "build_span_tree_summary",
+        "query_metrics_for_hypothesis", "query_logs_for_hypothesis",
         "run_propagation_direction_check", "query_app_stats_detailed",
         "compute_metric_latency_correlation"
     ]
@@ -126,8 +139,9 @@ async def rca_tools_node(state: RCAState, config: RunnableConfig) -> dict[str, A
     )
     
     tool_names = [
-        "query_anomalous_traces", "build_span_tree_summary", 
-        "query_metrics_for_hypothesis", "query_logs_for_hypothesis", 
+        "list_available_metrics_for_component",
+        "query_anomalous_traces", "build_span_tree_summary",
+        "query_metrics_for_hypothesis", "query_logs_for_hypothesis",
         "run_propagation_direction_check", "query_app_stats_detailed",
         "compute_metric_latency_correlation"
     ]

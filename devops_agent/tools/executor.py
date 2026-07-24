@@ -69,7 +69,13 @@ class ToolExecutor:
                     self._execution_history[ctx.execution_id] = result
                     return result
                 
-                if result.error_code not in retry_policy.retryable_error_codes and attempt == retry_policy.max_attempts:
+                # Non-retryable error: return immediately without further attempts
+                if result.error_code not in retry_policy.retryable_error_codes:
+                    self._execution_history[ctx.execution_id] = result
+                    return result
+
+                # Retryable error on the final attempt: give up
+                if attempt == retry_policy.max_attempts:
                     self._execution_history[ctx.execution_id] = result
                     return result
                     
