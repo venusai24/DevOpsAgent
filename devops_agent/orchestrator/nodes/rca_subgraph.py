@@ -23,7 +23,6 @@ class SubmitEvidenceReport(SubmitEvidenceReportSchema):
     pass
 
 class RCAState(InvestigationState):
-    rca_messages: Annotated[list[AnyMessage], operator.add]
     rca_duplicates: int
     rca_fingerprints: list[str]
     rca_hypothesis_calls: dict[str, int]

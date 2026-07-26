@@ -97,13 +97,8 @@ class DeterministicScorer:
                 if evidence_id:
                     mismatched_items.append(evidence_id)
             
-            if evidence_id and evidence_id in critic_lookup:
-                verdict = critic_lookup[evidence_id]
-                v_type = verdict.get("verdict") if isinstance(verdict, dict) else getattr(verdict, "verdict", None)
-                if v_type == "override":
-                    c_support = verdict.get("corrected_support") if isinstance(verdict, dict) else getattr(verdict, "corrected_support", None)
-                    if c_support:
-                        llm_support = c_support
+            # The Critic no longer overrides support directly; it issues critiques for the RCA agent.
+            # We use the llm_support as provided by the RCA agent's latest submission.
             
             source_weights = self.weights.get(evidence_source, {})
             weight = source_weights.get(llm_support, 0.0)

@@ -41,13 +41,14 @@ async def critic_agent_node(state: InvestigationState, config: RunnableConfig) -
     
     critic_system_prompt = """ROLE
 --------
-You are the Critic Agent. Your job is to review evidence classifications made by the RCA agent that conflict with the raw mathematical data (e.g., claiming a metric spike strongly supports a hypothesis when the Z-score is actually 0.0).
+You are the Critic Agent. Your job is to review evidence classifications made by the RCA agent that conflict with the raw mathematical data.
 
 CONSTRAINTS & RULES
 --------
 1. You MUST output a verdict for each provided mismatched evidence item.
-2. If the raw data does not match the directional_support claimed, override it to the correct support level (or 'neutral').
-3. You must call SubmitCriticVerdicts to finish."""
+2. If the raw data does not match the directional_support claimed, you must reject it with a critique using the 'reject_with_critique' verdict.
+3. Your 'rationale' will be sent directly to the RCA Agent. Explain clearly why its reasoning was flawed based on the numbers.
+4. You must call SubmitCriticVerdicts to finish."""
     
     messages = [
         SystemMessage(content=critic_system_prompt),
@@ -77,10 +78,23 @@ CONSTRAINTS & RULES
                 if verdicts and not isinstance(verdicts[0], dict):
                     verdicts = [v.model_dump() if hasattr(v, "model_dump") else v.dict() for v in verdicts]
                     
-                return {
+                # Generate feedback message for RCA agent
+                critique_lines = []
+                for v in verdicts:
+                    if v.get("verdict") == "reject_with_critique":
+                        critique_lines.append(f"Evidence ID {v.get('evidence_item_id')}: {v.get('rationale')}")
+                        
+                updates = {
                     "critic_verdicts": verdicts,
-                    "current_node": "critic"
+                    "current_node": "critic",
+                    "rca_completed": False
                 }
+                
+                if critique_lines:
+                    feedback = "CRITIC REJECTION: Your evidence report contained mathematical contradictions. Please re-evaluate the following items based on this feedback and submit a new report:\n" + "\n".join(critique_lines)
+                    updates["rca_messages"] = [HumanMessage(content=feedback)]
+                    
+                return updates
         
         # If we reach here, no valid tool call was found
-        return {"current_node": "critic"}
+        return {"current_node": "critic", "rca_completed": False}

@@ -111,7 +111,7 @@ def build_investigation_graph(checkpointer: BaseCheckpointSaver = None):
         "hitl_ambiguous_evidence": "hitl_ambiguous_evidence",
         "hitl_inconclusive": "hitl_inconclusive",
     })
-    builder.add_edge("critic", "deterministic_scoring")
+    builder.add_edge("critic", "rca")
     
     builder.add_edge("hitl_pre_evidence", "resume_after_hitl")
     builder.add_edge("hitl_ambiguous_evidence", "resume_after_hitl")

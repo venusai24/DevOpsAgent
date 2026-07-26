@@ -4,6 +4,8 @@ import operator
 from datetime import datetime
 from typing import Annotated, Any, Literal, TypedDict
 
+from langchain_core.messages import AnyMessage
+
 
 class ComponentInfo(TypedDict):
     name: str
@@ -115,3 +117,4 @@ class InvestigationState(TypedDict, total=False):
     error_log: list[dict[str, Any]]
     token_spend: dict[str, int]
     wall_clock_seconds: dict[str, float]
+    rca_messages: Annotated[list[AnyMessage], operator.add]

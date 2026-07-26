@@ -53,6 +53,5 @@ class SubmitEvidenceReport(BaseModel):
 
 class CriticVerdict(BaseModel):
     evidence_item_id: str
-    verdict: Literal["confirm_original", "override"]
-    corrected_support: Literal["strongly_supports", "weakly_supports", "neutral", "weakly_contradicts", "strongly_contradicts"] | None = None
+    verdict: Literal["confirm_original", "reject_with_critique"]
     rationale: str
