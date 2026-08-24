@@ -53,10 +53,12 @@ def route_after_triage(state: InvestigationState):
     # before routing to merge_rca.
     return dispatch_rca_fan_out(state)
 
-def route_after_scoring(state: InvestigationState) -> str:
+def route_after_scoring(state: InvestigationState):
     current = state.get("current_node")
     if current == "deterministic_scoring_needs_critic":
         return "critic"
+    elif current == "deterministic_scoring_needs_correction":
+        return dispatch_rca_fan_out(state)
     
     inv_state = state.get("investigation_state")
     if inv_state == "AMBIGUOUS":

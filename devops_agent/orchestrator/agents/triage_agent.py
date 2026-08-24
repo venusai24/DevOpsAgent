@@ -79,6 +79,10 @@ class TriageAgent:
         
     def parse_output(self, llm_response: dict[str, Any]) -> dict[str, Any]:
         """Validates and extracts only Stages 1-4 state fields."""
+        ranked_hypotheses = llm_response.get("ranked_hypotheses", [])
+        if len(ranked_hypotheses) > 5:
+            ranked_hypotheses = ranked_hypotheses[:5]
+            
         return {
             "blast_radius": llm_response.get("blast_radius", "localized"),
             "blast_radius_qualifier": llm_response.get("blast_radius_qualifier", "simultaneous"),
@@ -93,7 +97,7 @@ class TriageAgent:
             "concurrent_incident_clusters": llm_response.get("concurrent_incident_clusters", []),
             "boundary_ambiguous_components": llm_response.get("boundary_ambiguous_components", []),
             "dependency_graph": llm_response.get("dependency_graph", {}),
-            "ranked_hypotheses": llm_response.get("ranked_hypotheses", []),
+            "ranked_hypotheses": ranked_hypotheses,
             "investigation_state": llm_response.get("investigation_state", "active"),
             "current_node": "triage"
         }

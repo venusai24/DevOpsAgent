@@ -27,7 +27,7 @@ class TriageAgentOutput(BaseModel):
 class EvidenceItem(BaseModel):
     hypothesis_id: str
     evidence_source: Literal["metric", "log"]
-    raw_reference: dict[str, Any]
+    evidence_id: str
     directional_support: Literal["strongly_supports", "weakly_supports", "neutral", "weakly_contradicts", "strongly_contradicts"]
     rationale: str
 

@@ -21,10 +21,7 @@ class RCAAgent:
                 "component_registry": state.get("component_registry", {}),
                 "declared_topology_graph": state.get("declared_topology_graph", {}),
                 "stack_kpi_map": state.get("stack_kpi_map", {}),
-                # Authoritative metric name registry: cmdb_id -> [exact kpi_name strings].
-                # The LLM MUST use only these strings when calling query_metrics_for_hypothesis.
-                # Generic names like 'cpu' or 'disk' do NOT exist in telemetry and will fail.
-                "component_kpi_map": state.get("component_kpi_map", {}),
+
                 "blast_radius": state.get("blast_radius"),
                 "investigation_cluster": state.get("investigation_cluster", []),
                 "ranked_hypotheses": state.get("ranked_hypotheses", []),

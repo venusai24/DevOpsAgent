@@ -138,3 +138,6 @@ class InvestigationState(TypedDict, total=False):
     token_spend: Annotated[dict[str, int], _keep_last]
     wall_clock_seconds: Annotated[dict[str, float], _keep_last]
     rca_messages: Annotated[list[AnyMessage], operator.add]
+    turn_count: Annotated[int, _keep_last]
+    model_used: Annotated[str, _keep_last]
+    verification_failures: Annotated[int, _keep_last]

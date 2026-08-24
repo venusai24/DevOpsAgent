@@ -110,14 +110,12 @@ CONTEXT: DATA SOURCES & SCHEMAS
 
 CRITICAL CONSTRAINT: METRIC NAMES
 --------
-The 'component_kpi_map' in your context contains the ONLY valid kpi_name strings.
+You must use exact kpi_name strings. Generic names like 'cpu', 'disk', 'memory', or 'network' WILL ALWAYS FAIL.
 Examples of VALID names: 'Mysql-MySQL_3306_Select Scan', 'OSLinux-OSLinux_FILESYSTEM_-_FSUsedSpace'
-Examples of INVALID names (WILL ALWAYS FAIL): 'cpu', 'disk', 'memory', 'network'
 
 Workflow for querying metrics:
-  1. Check 'component_kpi_map' in your context for the target cmdb_id.
-  2. If the exact name is not obvious, call list_available_metrics_for_component FIRST.
-  3. Only then call query_metrics_for_hypothesis with the exact name from step 1 or 2.
+  1. You MUST call list_available_metrics_for_component FIRST to get the exact valid names.
+  2. Only then call query_metrics_for_hypothesis with the exact name.
 
 CONSTRAINTS & RULES
 --------
@@ -145,7 +143,11 @@ CONSTRAINTS & RULES
                         "Please take this feedback into account as you investigate."
                     )
                 )
-            )
+
+    if not is_first_turn:
+        has_counterfactual = any("Assume your current leading hypothesis is WRONG" in getattr(m, "content", "") for m in messages)
+        if len(messages) >= 10 and not has_counterfactual:
+            messages.append(HumanMessage(content="Assume your current leading hypothesis is WRONG. What evidence would disprove it? Query for that evidence now."))
 
     registry = get_registry()
     executor = ToolExecutor(registry)

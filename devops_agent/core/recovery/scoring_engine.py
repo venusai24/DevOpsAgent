@@ -61,7 +61,11 @@ class DeterministicScorer:
         evidence_items: List[Dict[str, Any]],
         evidence_log: List[Dict[str, Any]],
         critic_verdicts: List[Dict[str, Any]] = None,
-        prior_scores: Dict[str, float] = None
+        prior_scores: Dict[str, float] = None,
+        topology_graph: Dict[str, List[str]] = None,
+        t0: Any = None,
+        investigation_cluster: List[str] = None,
+        root_cause_candidate: Dict[str, Any] = None
     ) -> Tuple[Dict[str, float], List[str]]:
         
         mismatched_items = []
@@ -83,11 +87,27 @@ class DeterministicScorer:
                 if item_id:
                     critic_lookup[item_id] = cv
 
+        # Build lookup for evidence_log (Provenance)
+        evidence_lookup = {}
+        if evidence_log:
+            for ev in evidence_log:
+                ev_id = ev.get("evidence_id")
+                if ev_id:
+                    evidence_lookup[ev_id] = ev
+
         for item in evidence_items:
             item_dict = item if isinstance(item, dict) else (item.model_dump() if hasattr(item, "model_dump") else item.dict())
             
-            raw_ref = item_dict.get("raw_reference", {})
-            evidence_id = raw_ref.get("evidence_id")
+            # Phase 2: Schema uses evidence_id directly instead of raw_reference
+            evidence_id = item_dict.get("evidence_id")
+            
+            # Layer 5 (Provenance Verification)
+            if not evidence_id or evidence_id not in evidence_lookup:
+                if evidence_id:
+                    mismatched_items.append(evidence_id)
+                continue # Ignore hallucinated evidence entirely (weight=0)
+                
+            raw_ref = evidence_lookup[evidence_id]
             
             llm_support = item_dict.get("directional_support", "neutral")
             evidence_source = item_dict.get("evidence_source", "metric")
@@ -97,14 +117,60 @@ class DeterministicScorer:
                 if evidence_id:
                     mismatched_items.append(evidence_id)
             
-            # The Critic no longer overrides support directly; it issues critiques for the RCA agent.
-            # We use the llm_support as provided by the RCA agent's latest submission.
-            
             source_weights = self.weights.get(evidence_source, {})
             weight = source_weights.get(llm_support, 0.0)
             
             if hypothesis_id in hypothesis_log_odds:
                 hypothesis_log_odds[hypothesis_id] += weight
+
+        # Layer 3 (Temporal Verification) & Layer 2 (Topological Verification)
+        if root_cause_candidate:
+            rc_evidence_ids = []
+            if "supporting_evidence_ids" in root_cause_candidate:
+                rc_evidence_ids = root_cause_candidate["supporting_evidence_ids"]
+            elif "evidence_id" in root_cause_candidate:
+                rc_evidence_ids = [root_cause_candidate["evidence_id"]]
+                
+            rc_cmdb_id = root_cause_candidate.get("cmdb_id")
+            
+            # Layer 3 (Temporal Verification)
+            if t0:
+                from dateutil.parser import parse
+                import datetime
+                try:
+                    t0_dt = parse(str(t0))
+                    for ev_id in rc_evidence_ids:
+                        if ev_id in evidence_lookup:
+                            raw_ev = evidence_lookup[ev_id]
+                            ev_ts = raw_ev.get("anomaly_timestamp") or raw_ev.get("t0_metrics")
+                            if ev_ts:
+                                ev_dt = parse(str(ev_ts))
+                                # If the evidence anomaly happened AFTER T0 (+60s slack), it can't be the root cause.
+                                if ev_dt > (t0_dt + datetime.timedelta(seconds=60)):
+                                    if ev_id not in mismatched_items:
+                                        mismatched_items.append(ev_id)
+                except Exception as e:
+                    logger.debug(f"Temporal parsing error: {e}")
+
+            # Layer 2 (Topological Verification)
+            if topology_graph and investigation_cluster and rc_cmdb_id:
+                if rc_cmdb_id not in investigation_cluster:
+                    reachable = set()
+                    queue = [rc_cmdb_id]
+                    while queue:
+                        curr = queue.pop(0)
+                        if curr not in reachable:
+                            reachable.add(curr)
+                            queue.extend(topology_graph.get(curr, []))
+                    
+                    if not any(node in reachable for node in investigation_cluster):
+                        # Structurally impossible
+                        if rc_evidence_ids:
+                            for ev_id in rc_evidence_ids:
+                                if ev_id not in mismatched_items:
+                                    mismatched_items.append(ev_id)
+                        else:
+                            mismatched_items.append(f"topo_fail_{rc_cmdb_id}")
 
         if not hypothesis_log_odds:
             return {}, mismatched_items

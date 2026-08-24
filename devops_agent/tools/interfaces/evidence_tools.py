@@ -49,6 +49,7 @@ class QueryMetricsOutput(BaseModel):
     hypothesis_id: str = Field(description="Ties back to the input hypothesis.")
     cmdb_id: str = Field(description="Target component.")
     max_z_score: float = Field(description="Maximum deviation during window.")
+    anomaly_timestamp: str | None = Field(default=None, description="Timestamp of the maximum anomaly.")
     trend: str = Field(description="'spike', 'drop', 'flat', 'oscillating'")
     raw_data_points_summary: str = Field(description="A compact natural language summary of the curve.")
     resolution_note: str | None = Field(default=None, description="Note on how KPI was resolved.")
@@ -58,6 +59,13 @@ class QueryLogsInput(BaseModel):
     cmdb_id: str = Field(description="The target component to query. Must be an exact match to a known cmdb_id.")
     log_level_filter: str | None = Field(default="ERROR", description="Level to filter by (ERROR, WARN, etc). Do not guess non-standard levels.")
     grep_pattern: str | None = Field(default=None, description="Regex or keyword to search for.")
+    time_window_start: str | int | float = Field(description="Start time (ISO 8601 or timestamp string).")
+    time_window_end: str | int | float = Field(description="End time (ISO 8601 or timestamp string).")
+
+    @field_validator("time_window_start", "time_window_end", mode="before")
+    @classmethod
+    def _validate_timestamp(cls, v, info):
+        return parse_timestamp(v, info.field_name)
 
 class QueryLogsOutput(BaseModel):
     evidence_id: str = Field(description="Unique ID for this evidence item.")
@@ -176,7 +184,7 @@ class QueryMetricsTool(BaseTool[QueryMetricsInput, QueryMetricsOutput]):
             z_expr = f"ABS(value - {mean}) / {std}"
             
         sql = f"""
-            SELECT value, {z_expr} as z_score
+            SELECT timestamp, value, {z_expr} as z_score
             FROM read_csv_auto('{ctx.metrics_path}')
             WHERE timestamp >= ? AND timestamp <= ?
             AND cmdb_id = ?
@@ -186,9 +194,12 @@ class QueryMetricsTool(BaseTool[QueryMetricsInput, QueryMetricsOutput]):
         df = db.query(sql, (t_start, t_end, inputs.cmdb_id, resolved_kpi))
             
         if df.empty:
-            return QueryMetricsOutput(evidence_id="ev_empty", hypothesis_id=inputs.hypothesis_id, cmdb_id=inputs.cmdb_id, max_z_score=0.0, trend="flat", raw_data_points_summary="No data in time window.", resolution_note=note)
+            return QueryMetricsOutput(evidence_id="ev_empty", hypothesis_id=inputs.hypothesis_id, cmdb_id=inputs.cmdb_id, max_z_score=0.0, anomaly_timestamp=None, trend="flat", raw_data_points_summary="No data in time window.", resolution_note=note)
             
-        max_z = float(df['z_score'].max())
+        max_z_idx = df['z_score'].idxmax()
+        max_z = float(df.loc[max_z_idx, 'z_score'])
+        anomaly_ts = str(df.loc[max_z_idx, 'timestamp']) if max_z > 3.0 else None
+        
         vals = df['value'].tolist()
         
         if max_z > 3.0:
@@ -198,7 +209,7 @@ class QueryMetricsTool(BaseTool[QueryMetricsInput, QueryMetricsOutput]):
                 
         summary = f"{resolved_kpi} ({len(vals)} pts, max: {max(vals):.2f}, min: {min(vals):.2f}, max_z: {max_z:.2f})"
         evidence_id = f"ev_metric_{inputs.cmdb_id}_{resolved_kpi.replace('.', '_')}"
-        return QueryMetricsOutput(evidence_id=evidence_id, hypothesis_id=inputs.hypothesis_id, cmdb_id=inputs.cmdb_id, max_z_score=max_z, trend=global_trend, raw_data_points_summary=summary, resolution_note=note)
+        return QueryMetricsOutput(evidence_id=evidence_id, hypothesis_id=inputs.hypothesis_id, cmdb_id=inputs.cmdb_id, max_z_score=max_z, anomaly_timestamp=anomaly_ts, trend=global_trend, raw_data_points_summary=summary, resolution_note=note)
 
 class QueryLogsTool(BaseTool[QueryLogsInput, QueryLogsOutput]):
     @property
@@ -215,6 +226,9 @@ class QueryLogsTool(BaseTool[QueryLogsInput, QueryLogsOutput]):
         db = DuckDBClient.get_instance()
         pattern = inputs.grep_pattern.strip() if inputs.grep_pattern else inputs.log_level_filter
         
+        t_start = inputs.time_window_start
+        t_end = inputs.time_window_end
+        
         note = None
         exact = True
         
@@ -230,13 +244,14 @@ class QueryLogsTool(BaseTool[QueryLogsInput, QueryLogsOutput]):
                 SELECT value 
                 FROM read_csv_auto('{ctx.logs_path}')
                 WHERE cmdb_id = ?
+                AND timestamp >= ? AND timestamp <= ?
                 AND value ILIKE ?
                 LIMIT ?
             """
-            df = db.query(sql, (inputs.cmdb_id, f'%{pattern}%', RESULT_CAP + 1))
+            df = db.query(sql, (inputs.cmdb_id, t_start, t_end, f'%{pattern}%', RESULT_CAP + 1))
             
-            total_sql = f"SELECT count(*) AS n FROM read_csv_auto('{ctx.logs_path}') WHERE cmdb_id = ?"
-            total = db.query(total_sql, (inputs.cmdb_id,))["n"][0]
+            total_sql = f"SELECT count(*) AS n FROM read_csv_auto('{ctx.logs_path}') WHERE cmdb_id = ? AND timestamp >= ? AND timestamp <= ?"
+            total = db.query(total_sql, (inputs.cmdb_id, t_start, t_end))["n"][0]
             
             exact = len(df) <= RESULT_CAP
             match_count = len(df) if exact else f"{RESULT_CAP}+"
@@ -253,8 +268,9 @@ class QueryLogsTool(BaseTool[QueryLogsInput, QueryLogsOutput]):
                 SELECT value 
                 FROM read_csv_auto('{ctx.logs_path}')
                 WHERE cmdb_id = ?
+                AND timestamp >= ? AND timestamp <= ?
             """
-            df = db.query(sql, (inputs.cmdb_id,))
+            df = db.query(sql, (inputs.cmdb_id, t_start, t_end))
             match_count = len(df)
             total = len(df)
             rate_pct = 100.0
