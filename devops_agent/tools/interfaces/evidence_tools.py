@@ -80,7 +80,11 @@ RESULT_CAP = 500
 def resolve_kpi(cmdb_id: str, kpi_name: str, cmdb_baselines: dict) -> tuple[str, str | None]:
     host_metrics = cmdb_baselines.get(cmdb_id)
     if host_metrics is None:
-        raise ToolException(f"Unknown cmdb_id '{cmdb_id}'.")
+        raise ToolException(
+            f"Component '{cmdb_id}' has no telemetry data in the baseline "
+            f"and should be skipped. "
+            f"Known components with data: {list(cmdb_baselines.keys())[:10]}"
+        )
 
     normalized = kpi_name.strip().lower()
     by_lower = {k.lower(): k for k in host_metrics}
@@ -318,9 +322,13 @@ class ListAvailableMetricsTool(BaseTool[ListAvailableMetricsInput, ListAvailable
         baseline_data = _BASELINE_STORE.get(inputs.baseline_ref, {}).get("container_metrics", {})
         host_metrics = baseline_data.get(inputs.cmdb_id)
         if host_metrics is None:
-            raise ToolException(
-                f"Unknown cmdb_id '{inputs.cmdb_id}'. "
-                f"Known components: {list(baseline_data.keys())[:10]}"
+            # Component is in the declared topology but has no telemetry data
+            # (e.g. ServiceTest* dummy nodes). Return an empty list so the
+            # agent knows to skip this component rather than crashing.
+            return ListAvailableMetricsOutput(
+                cmdb_id=inputs.cmdb_id,
+                available_metrics=[],
+                metric_count=0,
             )
         metric_names = list(host_metrics.keys())
         return ListAvailableMetricsOutput(

@@ -72,6 +72,7 @@ async def context_assembler_agent_node(state: InvestigationState, config: Runnab
     tc_values = []
     kpi_map = {}
     
+    dependencies_unknown = False
     try:
         db = DuckDBClient.get_instance()
         

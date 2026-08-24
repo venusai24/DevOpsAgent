@@ -37,7 +37,7 @@ async def critic_agent_node(state: InvestigationState, config: RunnableConfig) -
     
     bundle = agent.construct_prompt_bundle(state, mismatched_items)
     
-    llm = LLMFactory.get_llm("rca").bind_tools([SubmitCriticVerdicts])
+    llm = LLMFactory.get_llm("critic").bind_tools([SubmitCriticVerdicts])
     
     critic_system_prompt = """ROLE
 --------
@@ -87,13 +87,21 @@ CONSTRAINTS & RULES
                 updates = {
                     "critic_verdicts": verdicts,
                     "current_node": "critic",
-                    "rca_completed": False
+                    "rca_completed": False,
                 }
-                
+
                 if critique_lines:
-                    feedback = "CRITIC REJECTION: Your evidence report contained mathematical contradictions. Please re-evaluate the following items based on this feedback and submit a new report:\n" + "\n".join(critique_lines)
-                    updates["rca_messages"] = [HumanMessage(content=feedback)]
-                    
+                    # Write to a top-level field so the feedback survives the next
+                    # rca fan-out dispatch. rca_messages is branch-local and gets
+                    # reset on each Send — writing directly to it here would be lost.
+                    feedback = (
+                        "CRITIC REJECTION: Your evidence report contained mathematical "
+                        "contradictions. Please re-evaluate the following items based on "
+                        "this feedback and submit a new report:\n"
+                        + "\n".join(critique_lines)
+                    )
+                    updates["critic_feedback_for_rca"] = feedback
+
                 return updates
         
         # If we reach here, no valid tool call was found

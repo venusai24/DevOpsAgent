@@ -3,6 +3,8 @@
 import logging
 from typing import Optional
 
+from langgraph.checkpoint.memory import MemorySaver
+
 from ..orchestrator.graph import build_investigation_graph
 from ..state.config import PersistenceConfig
 
@@ -41,8 +43,9 @@ class AppContainer:
         self.tool_executor = ToolExecutor(self.tool_registry)
         
         # 6. Orchestration Graph
-        # Checkpointer would be passed here (e.g., MemorySaver or PostgresSaver)
-        self.graph = build_investigation_graph(checkpointer=None)
+        # A checkpointer is required for LangGraph to support breakpoints (interrupt_before).
+        self.checkpointer = MemorySaver()
+        self.graph = build_investigation_graph(checkpointer=self.checkpointer)
 
     @classmethod
     def get_instance(cls) -> 'AppContainer':

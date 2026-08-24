@@ -23,6 +23,14 @@ class SubmitEvidenceReport(SubmitEvidenceReportSchema):
     pass
 
 class RCAState(InvestigationState):
+    # Branch identity (set by dispatch_rca_fan_out)
+    rca_target_component: str          # Which component this branch is scoped to
+    rca_branch_id: str                 # Unique branch identifier (= component name)
+    # Per-branch budget (set by dispatch_rca_fan_out, never shared across branches)
+    rca_branch_total_budget: int       # Max total tool calls for this branch
+    rca_branch_tool_count: int         # Running tool-call count for this branch
+    rca_hyp_per_hypothesis_budget: int # Max tool calls per hypothesis
+    # Loop-prevention state (branch-local)
     rca_duplicates: int
     rca_fingerprints: list[str]
     rca_hypothesis_calls: dict[str, int]
@@ -41,12 +49,54 @@ def _global_stopping_condition_met(scores: dict[str, float], surviving: list[str
         return True
     return False
 
+def _make_exhausted_branch_result(
+    state: "RCAState",
+    surviving: list[str],
+    eliminated_hypotheses: list[dict],
+    reason: str,
+) -> dict:
+    """Build a well-formed branch result dict when a branch exhausts its budget or hits loop prevention.
+
+    The merge node expects the same shape as a normal SubmitEvidenceReport output;
+    this helper ensures budget-exhausted branches produce a consistent, mergeable result.
+    """
+    return {
+        "branch_id": state.get("rca_branch_id", "ALL"),
+        "target_component": state.get("rca_target_component", "ALL"),
+        "surviving_hypotheses": surviving,
+        "eliminated_hypotheses": eliminated_hypotheses,
+        "updated_hypothesis_scores": {},
+        "evidence_items": [],
+        "root_cause_candidate": None,
+        "causal_chain": [],
+        "primary_bottleneck": None,
+        "refined_dependency_graph": {},
+        "undeclared_dependencies": [],
+        "propagation_verified_pairs": [],
+        "investigation_state": "AMBIGUOUS",
+        "confidence_level": "INCONCLUSIVE",
+        "investigation_gaps": [{"reason": reason}],
+        "narrative_summary": "",
+        "final_report": None,
+        "unconfirmed_links": [],
+    }
+
+
 async def rca_llm_node(state: RCAState, config: RunnableConfig) -> dict[str, Any]:
     agent = RCAAgent()
-    
+
     messages = state.get("rca_messages", [])
-    if not messages:
+    is_first_turn = not messages
+    if is_first_turn:
         bundle = agent.construct_prompt_bundle(state)
+        target_component = state.get("rca_target_component", "ALL")
+        scope_note = (
+            f"\n\nTARGET COMPONENT SCOPE: {target_component}\n"
+            "Investigate ONLY evidence directly relevant to this component.\n"
+            "You may query other components only when needed to verify propagation direction."
+            if target_component != "ALL"
+            else ""
+        )
         rca_system_prompt = """ROLE
 --------
 You are the RCA Agent. Your task is to deduce the root cause by gathering evidence for hypotheses.
@@ -76,9 +126,27 @@ CONSTRAINTS & RULES
 3. When finished, you MUST call SubmitEvidenceReport."""
         messages = [
             SystemMessage(content=rca_system_prompt),
-            HumanMessage(content=f"Deduce root cause based on state:\n{json.dumps(bundle, default=str)}")
+            HumanMessage(
+                content=(
+                    f"Deduce root cause based on state:{scope_note}\n"
+                    f"{json.dumps(bundle, default=str)}"
+                )
+            ),
         ]
-        
+        # Inject critic feedback if present from a previous RCA pass.
+        # Read from the top-level state field (written by critic_agent_node).
+        critic_feedback = state.get("critic_feedback_for_rca")
+        if critic_feedback:
+            messages.append(
+                HumanMessage(
+                    content=(
+                        "[Critic Feedback from previous pass]\n"
+                        f"{critic_feedback}\n\n"
+                        "Please take this feedback into account as you investigate."
+                    )
+                )
+            )
+
     registry = get_registry()
     executor = ToolExecutor(registry)
     inv_id_str = state.get("investigation_id", str(uuid.uuid4()))
@@ -113,7 +181,19 @@ CONSTRAINTS & RULES
     llm = LLMFactory.get_llm("rca").bind_tools(tools + [SubmitEvidenceReport])
     
     response = await llm.ainvoke(messages, config=config)
-    return {"rca_messages": [response] if not state.get("rca_messages") else messages + [response]}
+
+    # ── Message accumulation fix ────────────────────────────────────────────────
+    # rca_messages uses operator.add (append-only reducer). Returning
+    # `messages + [response]` on subsequent turns would re-append the entire
+    # history, duplicating every message (and every tool_call_id), which causes
+    # the 400 "Duplicate tool response" API error.
+    #
+    # Rule: first turn returns the full initial conversation (system + human +
+    # response) so those messages are persisted into state. Every subsequent
+    # turn returns only [response] — operator.add handles the append.
+    if is_first_turn:
+        return {"rca_messages": messages + [response]}
+    return {"rca_messages": [response]}
 
 async def rca_tools_node(state: RCAState, config: RunnableConfig) -> dict[str, Any]:
     messages = state.get("rca_messages", [])
@@ -167,65 +247,80 @@ async def rca_tools_node(state: RCAState, config: RunnableConfig) -> dict[str, A
     
     eliminated_hypotheses = list(state.get("eliminated_hypotheses", []))
     
+    # ── Per-branch budget state ──────────────────────────────────────────────
+    branch_tool_count: int = state.get("rca_branch_tool_count", 0)
+    branch_total_budget: int = state.get("rca_branch_total_budget", 10)
+    hyp_budget: int = state.get("rca_hyp_per_hypothesis_budget", 4)
+    branch_id: str = state.get("rca_branch_id", "ALL")
+
     for tc in last_msg.tool_calls:
         name = tc["name"]
         if name == "SubmitEvidenceReport":
             final_output = tc["args"]
+            # Parse the evidence report
             parsed = final_output.copy()
-            parsed["current_node"] = "rca"
             parsed.pop("evidence_log", None)
             parsed["rca_completed"] = True
-            return parsed
-            
+            parsed["current_node"] = "rca"
+            # Convert evidence_items from dicts/models to plain dicts
+            raw_evidence = parsed.get("evidence_items", [])
+            evidence_dicts = []
+            for item in raw_evidence:
+                if hasattr(item, "model_dump"):
+                    evidence_dicts.append(item.model_dump())
+                elif hasattr(item, "dict"):
+                    evidence_dicts.append(item.dict())
+                elif isinstance(item, dict):
+                    evidence_dicts.append(item)
+            parsed["evidence_items"] = evidence_dicts
+            # Write to branch accumulator instead of clobbering shared state
+            branch_result = {
+                "branch_id": branch_id,
+                "target_component": state.get("rca_target_component", "ALL"),
+                "surviving_hypotheses": parsed.get("surviving_hypotheses", surviving),
+                "eliminated_hypotheses": parsed.get("eliminated_hypotheses", eliminated_hypotheses),
+                "updated_hypothesis_scores": {},  # Scoring done by deterministic_scoring_node
+                "evidence_items": evidence_dicts,
+                "root_cause_candidate": parsed.get("root_cause_candidate"),
+                "causal_chain": parsed.get("causal_chain", []),
+                "primary_bottleneck": parsed.get("primary_bottleneck"),
+                "refined_dependency_graph": parsed.get("refined_dependency_graph", {}),
+                "undeclared_dependencies": parsed.get("undeclared_dependencies", []),
+                "propagation_verified_pairs": parsed.get("propagation_verified_pairs", []),
+                "investigation_state": parsed.get("investigation_state", "active"),
+                "confidence_level": parsed.get("confidence_level"),
+                "investigation_gaps": parsed.get("investigation_gaps", []),
+                "narrative_summary": parsed.get("narrative_summary", ""),
+                "final_report": parsed.get("final_report"),
+                "unconfirmed_links": parsed.get("unconfirmed_links", []),
+            }
+            return {
+                "per_branch_rca_results": [branch_result],
+                "evidence_log": evidence_dicts,
+                "rca_branch_tool_count": branch_tool_count,
+                "rca_completed": True,
+            }
+
         elif name in tool_map:
             tool = tool_map[name]
-            
-            # Loop prevention
+
+            # Loop prevention check moved to after the loop
             fingerprint = f"{name}:{json.dumps(tc['args'], sort_keys=True)}"
             if fingerprint in rca_fingerprints:
                 rca_duplicates += 1
             else:
                 rca_fingerprints = rca_fingerprints + [fingerprint]
-                
-            if rca_duplicates >= 3:
-                # Force loop break
-                parsed = {
-                    "evidence_items": [],
-                    "is_ready_to_conclude": False,
-                    "eliminated_hypotheses": eliminated_hypotheses,
-                    "surviving_hypotheses": surviving,
-                    "refined_dependency_graph": {},
-                    "undeclared_dependencies": [],
-                    "propagation_verified_pairs": [],
-                    "investigation_state": "AMBIGUOUS",
-                    "current_node": "rca",
-                    "investigation_gaps": [{"reason": "Loop prevention triggered in RCA"}],
-                    "rca_completed": True
-                }
-                return parsed
-                
-            # Budget tracking
-            current_hypothesis = tc["args"].get("hypothesis_name", surviving[0] if surviving else "mock_hyp")
-            rca_hypothesis_calls[current_hypothesis] = rca_hypothesis_calls.get(current_hypothesis, 0) + 1
-            
-            # We skip advanced convergence logic here to keep it simple, but we enforce hard budget.
-            total_calls = sum(rca_hypothesis_calls.values())
-            if total_calls > 15 or rca_hypothesis_calls[current_hypothesis] > 5:
-                # Budget exhausted
-                parsed = {
-                    "evidence_items": [],
-                    "is_ready_to_conclude": False,
-                    "eliminated_hypotheses": eliminated_hypotheses,
-                    "surviving_hypotheses": surviving,
-                    "refined_dependency_graph": {},
-                    "undeclared_dependencies": [],
-                    "propagation_verified_pairs": [],
-                    "investigation_state": "AMBIGUOUS",
-                    "current_node": "rca",
-                    "investigation_gaps": [{"reason": "Budget exhausted in RCA"}],
-                    "rca_completed": True
-                }
-                return parsed
+
+            # Per-branch budget counters
+            current_hypothesis = (
+                tc["args"].get("hypothesis_id") or
+                tc["args"].get("hypothesis_name") or
+                (surviving[0] if surviving else "mock_hyp")
+            )
+            rca_hypothesis_calls[current_hypothesis] = (
+                rca_hypothesis_calls.get(current_hypothesis, 0) + 1
+            )
+            branch_tool_count += 1
                 
             try:
                 result = await tool.ainvoke(tc["args"], config=config)
@@ -245,43 +340,71 @@ async def rca_tools_node(state: RCAState, config: RunnableConfig) -> dict[str, A
         else:
             new_messages.append(ToolMessage(content=f"Error: Unknown tool {name}", tool_call_id=tc["id"]))
             
+    # ── Enforce Budgets & Loop Prevention ──
+    if rca_duplicates >= 3:
+        branch_result = _make_exhausted_branch_result(
+            state, surviving, eliminated_hypotheses,
+            reason="Loop prevention triggered in RCA",
+        )
+        return {
+            "per_branch_rca_results": [branch_result],
+            "rca_completed": True,
+        }
+
+    max_hyp_calls = max(rca_hypothesis_calls.values()) if rca_hypothesis_calls else 0
+    if branch_tool_count > branch_total_budget or max_hyp_calls > hyp_budget:
+        branch_result = _make_exhausted_branch_result(
+            state, surviving, eliminated_hypotheses,
+            reason=(
+                f"Per-branch budget exhausted (branch={branch_id}, "
+                f"total_calls={branch_tool_count}/{branch_total_budget}, "
+                f"max_hyp_calls={max_hyp_calls}/{hyp_budget})"
+            ),
+        )
+        return {
+            "per_branch_rca_results": [branch_result],
+            "rca_branch_tool_count": branch_tool_count,
+            "rca_hypothesis_calls": rca_hypothesis_calls,
+            "rca_completed": True,
+        }
+
     return {
         "rca_messages": new_messages,
         "rca_duplicates": rca_duplicates,
         "rca_fingerprints": rca_fingerprints,
         "rca_hypothesis_calls": rca_hypothesis_calls,
+        "rca_branch_tool_count": branch_tool_count,
         "evidence_log": new_evidence,
         "surviving_hypotheses": surviving,
-        "eliminated_hypotheses": eliminated_hypotheses
+        "eliminated_hypotheses": eliminated_hypotheses,
     }
 
 def rca_should_continue(state: RCAState) -> str:
     messages = state.get("rca_messages", [])
     if not messages:
         return "rca_llm_node"
-        
+
     last_msg = messages[-1]
-    
-    # Global stopping condition
+
+    # Global stopping condition (score-based convergence)
     scores = state.get("updated_hypothesis_scores", {})
     surviving = state.get("surviving_hypotheses", [])
     if _global_stopping_condition_met(scores, surviving):
         return END
-        
+
     if not hasattr(last_msg, "tool_calls") or not last_msg.tool_calls:
         return "rca_tools_node"
-        
+
     for tc in last_msg.tool_calls:
         if tc["name"] == "SubmitEvidenceReport":
             return "rca_tools_node"
-            
-    if state.get("rca_duplicates", 0) >= 3:
+
+    # Per-branch budget guard (avoids even entering the tools node when over budget)
+    branch_tool_count = state.get("rca_branch_tool_count", 0)
+    branch_total_budget = state.get("rca_branch_total_budget", 10)
+    if state.get("rca_duplicates", 0) >= 3 or branch_tool_count > branch_total_budget:
         return "rca_tools_node"
-        
-    rca_hypothesis_calls = state.get("rca_hypothesis_calls", {})
-    if sum(rca_hypothesis_calls.values()) > 15:
-        return "rca_tools_node"
-        
+
     return "rca_tools_node"
 
 def rca_tools_condition(state: RCAState) -> str:

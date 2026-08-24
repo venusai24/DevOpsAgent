@@ -8,6 +8,7 @@ it left off, with the hint injected into the agent's message context.
 
 import asyncio
 import logging
+import sys
 import uuid
 from datetime import UTC, datetime
 from typing import Any
@@ -190,8 +191,12 @@ async def run_investigation() -> None:
             break
 
     except Exception as e:
-        print(f"\n❌ Investigation Failed: {e}")
-        raise
+        if "RESOURCE_EXHAUSTED" in str(e) or "429" in str(e):
+            print("\n❌ Investigation Failed: LLM token count over please try again later")
+            sys.exit(1)
+        else:
+            print(f"\n❌ Investigation Failed: {e}")
+            raise
     finally:
         app.clock.pause()
         print(f"\nTime Elapsed: {app.clock.elapsed_seconds():.1f}s")
