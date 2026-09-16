@@ -128,7 +128,7 @@ def dispatch_rca_fan_out(state: InvestigationState) -> list[Send]:
         for component in candidates
     ]
 
-
+# Unnecessary Code Deprecated - Kept for future extensibility
 def _build_initial_messages(
     component: str | None,
     critic_feedback: str | None,

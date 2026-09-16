@@ -52,7 +52,7 @@ class CausalChainHop(TypedDict):
     link_type: Literal["trace_verified", "metric_inferred", "declared"]
 
 class InvestigationState(TypedDict, total=False):
-    # ── Identity ──────────────────────────────────────────────────────
+    # Identity
     # Annotated with _keep_last so parallel RCA fan-out branches can all
     # write back the same investigation_id without triggering
     # LangGraph's InvalidUpdateError ("Can receive only one value per step").
@@ -60,19 +60,19 @@ class InvestigationState(TypedDict, total=False):
     time_range: Annotated[tuple[datetime, datetime], _keep_last]
     explicit_symptoms: Annotated[dict[str, Any], _keep_last]
     
-    # ── Data Sources ──────────────────────────────────────────────────
+    # Data Sources
     app_stats_path: Annotated[str, _keep_last]
     metrics_path: Annotated[str, _keep_last]
     logs_path: Annotated[str, _keep_last]
     traces_path: Annotated[str, _keep_last]
     
-    # ── Stage -1: Deduplication ───────────────────────────────────────
+    # Stage -1: Deduplication
     dedup_decision: Annotated[Literal["NEW", "DUPLICATE", "SUBSET", "SUPERSET", "PARTIAL_OVERLAP"], _keep_last]
     reuse_investigation_id: Annotated[str | None, _keep_last]
     stage0_artifacts_available: Annotated[bool, _keep_last]
     concurrent_investigation_ids: Annotated[list[str], _keep_last]
     
-    # ── Stage 0: Context Assembly ─────────────────────────────────────
+    # Stage 0: Context Assembly
     component_registry: Annotated[dict[str, ComponentInfo], _keep_last]
     declared_topology_graph: Annotated[dict[str, list[str]], _keep_last]
     discovered_topology_graph: Annotated[dict[str, list[str]], _keep_last]
@@ -84,7 +84,7 @@ class InvestigationState(TypedDict, total=False):
     baseline_registry_ref: Annotated[str, _keep_last]
     stage_0_gaps: Annotated[list[dict[str, Any]], _keep_last]
     
-    # ── Stages 1–4: Triage ────────────────────────────────────────────
+    # Stages 1–4: Triage
     blast_radius: Annotated[Literal["localized", "selective", "broad", "systemic"], _keep_last]
     blast_radius_qualifier: Annotated[Literal["simultaneous", "sequential"], _keep_last]
     symptom_pattern: Annotated[str, _keep_last]
@@ -99,7 +99,7 @@ class InvestigationState(TypedDict, total=False):
     boundary_ambiguous_components: Annotated[list[str], _keep_last]
     ranked_hypotheses: Annotated[list[HypothesisSpec], _keep_last]
     
-    # ── Stages 5–8: RCA ───────────────────────────────────────────────
+    # Stages 5–8: RCA
     evidence_matrix: Annotated[dict[str, list[EvidenceItem]], _keep_last]
     evidence_items: Annotated[list[dict[str, Any]], _keep_last]
     updated_hypothesis_scores: Annotated[dict[str, float], _keep_last]
@@ -125,7 +125,7 @@ class InvestigationState(TypedDict, total=False):
     # Written by critic_agent_node; consumed by rca_dispatch_node.
     critic_feedback_for_rca: str | None
     
-    # ── Cross-cutting ─────────────────────────────────────────────────
+    # Cross-cutting
     investigation_state: Annotated[Literal["active", "AMBIGUOUS_PRE_EVIDENCE", "AMBIGUOUS", "INCONCLUSIVE", "complete"], _keep_last]
     current_trace_run_id: Annotated[str | None, _keep_last]
     investigation_gaps: Annotated[list[dict[str, Any]], _keep_last]

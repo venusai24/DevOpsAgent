@@ -17,6 +17,14 @@ from ..state import InvestigationState
 from ..agents.triage_agent import TriageAgent
 from ..agents.schemas import TriageAgentOutput
 
+
+def _safe_uuid(value: str) -> uuid.UUID:
+    """Parse value as UUID; fall back to a deterministic UUID v5 if malformed."""
+    try:
+        return uuid.UUID(value)
+    except (ValueError, AttributeError):
+        return uuid.uuid5(uuid.NAMESPACE_DNS, str(value))
+
 class SubmitTriageReport(TriageAgentOutput):
     """Submit the final investigation brief and triage findings. Call this ONLY when you have finished using the other tools to investigate the data."""
     pass
@@ -61,7 +69,7 @@ CONSTRAINTS & RULES
     inv_id_str = state.get("investigation_id", str(uuid.uuid4()))
     actual_graph = state.get("discovered_topology_graph") or state.get("declared_topology_graph", {})
     ctx = ToolContext(
-        investigation_id=uuid.UUID(inv_id_str) if isinstance(inv_id_str, str) else inv_id_str, 
+        investigation_id=_safe_uuid(inv_id_str) if isinstance(inv_id_str, str) else inv_id_str, 
         cluster_id="triage", 
         baseline_ref=state.get("baseline_registry_ref"),
         app_stats_path=state.get("app_stats_path"),
@@ -97,7 +105,7 @@ async def triage_tools_node(state: TriageState, config: RunnableConfig) -> dict[
     inv_id_str = state.get("investigation_id", str(uuid.uuid4()))
     actual_graph = state.get("discovered_topology_graph") or state.get("declared_topology_graph", {})
     ctx = ToolContext(
-        investigation_id=uuid.UUID(inv_id_str) if isinstance(inv_id_str, str) else inv_id_str, 
+        investigation_id=_safe_uuid(inv_id_str) if isinstance(inv_id_str, str) else inv_id_str, 
         cluster_id="triage", 
         baseline_ref=state.get("baseline_registry_ref"),
         app_stats_path=state.get("app_stats_path"),

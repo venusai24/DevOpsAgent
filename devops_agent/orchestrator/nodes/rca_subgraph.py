@@ -18,6 +18,14 @@ from ..agents.schemas import SubmitEvidenceReport as SubmitEvidenceReportSchema
 from ..state import InvestigationState
 
 
+def _safe_uuid(value: str) -> uuid.UUID:
+    """Parse value as UUID; fall back to a deterministic UUID v5 if malformed."""
+    try:
+        return uuid.UUID(value)
+    except (ValueError, AttributeError):
+        return uuid.uuid5(uuid.NAMESPACE_DNS, str(value))
+
+
 class SubmitEvidenceReport(SubmitEvidenceReportSchema):
     """Submit the evidence classification report. Call this ONLY when you have isolated the root cause or gathered sufficient evidence."""
     pass
@@ -143,6 +151,7 @@ CONSTRAINTS & RULES
                         "Please take this feedback into account as you investigate."
                     )
                 )
+            )
 
     if not is_first_turn:
         has_counterfactual = any("Assume your current leading hypothesis is WRONG" in getattr(m, "content", "") for m in messages)
@@ -154,7 +163,7 @@ CONSTRAINTS & RULES
     inv_id_str = state.get("investigation_id", str(uuid.uuid4()))
     actual_graph = state.get("discovered_topology_graph") or state.get("declared_topology_graph", {})
     ctx = ToolContext(
-        investigation_id=uuid.UUID(inv_id_str) if isinstance(inv_id_str, str) else inv_id_str, 
+        investigation_id=_safe_uuid(inv_id_str) if isinstance(inv_id_str, str) else inv_id_str, 
         cluster_id="rca", 
         baseline_ref=state.get("baseline_registry_ref"),
         app_stats_path=state.get("app_stats_path"),
@@ -209,7 +218,7 @@ async def rca_tools_node(state: RCAState, config: RunnableConfig) -> dict[str, A
     inv_id_str = state.get("investigation_id", str(uuid.uuid4()))
     actual_graph = state.get("discovered_topology_graph") or state.get("declared_topology_graph", {})
     ctx = ToolContext(
-        investigation_id=uuid.UUID(inv_id_str) if isinstance(inv_id_str, str) else inv_id_str, 
+        investigation_id=_safe_uuid(inv_id_str) if isinstance(inv_id_str, str) else inv_id_str, 
         cluster_id="rca", 
         baseline_ref=state.get("baseline_registry_ref"),
         app_stats_path=state.get("app_stats_path"),

@@ -21,8 +21,22 @@ from devops_agent.orchestrator.state import InvestigationState
 
 logging.basicConfig(level=logging.INFO)
 
-investigation_id = str(uuid.uuid4())
-trace_run_id = str(uuid.uuid4())
+import os
+
+def _ensure_uuid(value: str) -> str:
+    """Return value if it's a valid UUID hex string, otherwise derive a
+    deterministic UUID v5 from it so downstream uuid.UUID() calls never crash."""
+    try:
+        uuid.UUID(value)
+        return value
+    except ValueError:
+        # Derive a deterministic UUID from the human-readable name so that
+        # re-runs with the same INVESTIGATION_ID still resume the same checkpoint.
+        return str(uuid.uuid5(uuid.NAMESPACE_DNS, value))
+
+_raw_id = os.environ.get("INVESTIGATION_ID", "dev-investigation-1")
+investigation_id = _ensure_uuid(_raw_id)
+trace_run_id = _ensure_uuid(os.environ.get("TRACE_RUN_ID", str(uuid.uuid4())))
 init_observability(run_id=investigation_id)
 
 # 1. Initialize the Dependency Injection Container
@@ -141,65 +155,82 @@ async def run_investigation() -> None:
     print(f"Starting Investigation: {investigation_id}\n")
     app.clock.start()
 
-    current_input: Any = initial_state  # first invocation uses full initial state
-    current_config = config
+    from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+    from devops_agent.orchestrator.graph import build_investigation_graph
 
-    try:
-        while True:
-            interrupted = False
-            interrupt_payload = None
+    # Keep the SQLite connection alive for the full duration of the investigation.
+    # The graph, checkpoint reads, HITL resumes, and writes all happen inside this block.
+    async with AsyncSqliteSaver.from_conn_string("devops_agent_checkpoints.sqlite") as saver:
+        await saver.setup()
+        app.graph = build_investigation_graph(checkpointer=saver)
 
-            async for event in app.graph.astream(current_input, config=current_config, stream_mode="updates"):
-                for node_name, state_update in event.items():
+        current_config = config
 
-                    # ── LangGraph interrupt signal ──────────────────────────
-                    if node_name == "__interrupt__":
-                        # state_update is a tuple/list of Interrupt objects.
-                        # Guard: LangGraph may occasionally emit an empty sequence;
-                        # treat that as a no-op rather than crashing on [0].
-                        if isinstance(state_update, (list, tuple)):
-                            if not state_update:
-                                continue  # empty interrupt sequence — nothing to handle
-                            interrupt_obj = state_update[0]
-                        else:
-                            interrupt_obj = state_update
-                        interrupt_payload = getattr(interrupt_obj, "value", interrupt_obj)
-                        interrupted = True
-                        break  # stop consuming the stream; we must prompt the user
-
-                    # ── Normal node completion ──────────────────────────────
-                    print(f"✅ Completed Agent Node: {node_name}")
-
-                    if isinstance(state_update, dict) and state_update.get("final_report"):
-                        print("\n🔥 ROOT CAUSE REPORT 🔥")
-                        print(state_update["final_report"])
-
-                if interrupted:
-                    break  # exit the async for loop to handle HITL
-
-            # ── Handle the interrupt (pause → human prompt → play) ──────────
-            if interrupted and interrupt_payload is not None:
-                human_response = _prompt_human(interrupt_payload)
-
-                # Resume by sending the human's structured response back.
-                # The graph resumes from where it paused (before the HITL node).
-                current_input = Command(resume=human_response)
-                # config remains the same (same thread_id keeps the checkpoint)
-                continue  # re-enter the while loop to keep streaming
-
-            # ── No interrupt — graph finished naturally ─────────────────────
-            break
-
-    except Exception as e:
-        if "RESOURCE_EXHAUSTED" in str(e) or "429" in str(e):
-            print("\n❌ Investigation Failed: LLM token count over please try again later")
-            sys.exit(1)
+        # Resume from checkpoint if a prior run exists for this investigation_id.
+        saved_state = await app.graph.aget_state(current_config)
+        if saved_state.next:
+            print(f"♻️  Resuming existing investigation from checkpoint (next={saved_state.next})...")
+            current_input: Any = None
         else:
-            print(f"\n❌ Investigation Failed: {e}")
-            raise
-    finally:
-        app.clock.pause()
-        print(f"\nTime Elapsed: {app.clock.elapsed_seconds():.1f}s")
+            print(f"🆕 Starting fresh investigation...")
+            current_input: Any = initial_state  # first invocation uses full initial state
+
+        try:
+            while True:
+                interrupted = False
+                interrupt_payload = None
+
+                async for event in app.graph.astream(current_input, config=current_config, stream_mode="updates"):
+                    for node_name, state_update in event.items():
+
+                        # ── LangGraph interrupt signal ──────────────────────────
+                        if node_name == "__interrupt__":
+                            # state_update is a tuple/list of Interrupt objects.
+                            # Guard: LangGraph may occasionally emit an empty sequence;
+                            # treat that as a no-op rather than crashing on [0].
+                            if isinstance(state_update, (list, tuple)):
+                                if not state_update:
+                                    continue  # empty interrupt sequence — nothing to handle
+                                interrupt_obj = state_update[0]
+                            else:
+                                interrupt_obj = state_update
+                            interrupt_payload = getattr(interrupt_obj, "value", interrupt_obj)
+                            interrupted = True
+                            break  # stop consuming the stream; we must prompt the user
+
+                        # ── Normal node completion ──────────────────────────────
+                        print(f"✅ Completed Agent Node: {node_name}")
+
+                        if isinstance(state_update, dict) and state_update.get("final_report"):
+                            print("\n🔥 ROOT CAUSE REPORT 🔥")
+                            print(state_update["final_report"])
+
+                    if interrupted:
+                        break  # exit the async for loop to handle HITL
+
+                # ── Handle the interrupt (pause → human prompt → play) ──────────
+                if interrupted and interrupt_payload is not None:
+                    human_response = _prompt_human(interrupt_payload)
+
+                    # Resume by sending the human's structured response back.
+                    # The graph resumes from where it paused (before the HITL node).
+                    current_input = Command(resume=human_response)
+                    # config remains the same (same thread_id keeps the checkpoint)
+                    continue  # re-enter the while loop to keep streaming
+
+                # ── No interrupt — graph finished naturally ─────────────────────
+                break
+
+        except Exception as e:
+            if "RESOURCE_EXHAUSTED" in str(e) or "429" in str(e):
+                print("\n❌ Investigation Failed: LLM token count over please try again later")
+                sys.exit(1)
+            else:
+                print(f"\n❌ Investigation Failed: {e}")
+                raise
+        finally:
+            app.clock.pause()
+            print(f"\nTime Elapsed: {app.clock.elapsed_seconds():.1f}s")
 
 
 asyncio.run(run_investigation())

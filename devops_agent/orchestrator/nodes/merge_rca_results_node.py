@@ -103,14 +103,15 @@ def merge_rca_results_node(state: InvestigationState) -> dict[str, Any]:
     # Cross-branch agreement bonus: if ≥2 branches point to the same root component
     if root_cause_candidate:
         rc_component = _extract_component_id(root_cause_candidate)
-        agreeing = [
-            b for b in branches
-            if _extract_component_id(b.get("root_cause_candidate")) == rc_component
-            and b.get("root_cause_candidate") is not None
-        ]
-        if len(agreeing) >= 2 and root_cause_candidate:
-            root_cause_candidate = dict(root_cause_candidate)
-            root_cause_candidate["cross_branch_agreement"] = len(agreeing)
+        if rc_component:
+            agreeing = [
+                b for b in branches
+                if _extract_component_id(b.get("root_cause_candidate")) == rc_component
+                and b.get("root_cause_candidate") is not None
+            ]
+            if len(agreeing) >= 2:
+                root_cause_candidate = dict(root_cause_candidate)
+                root_cause_candidate["cross_branch_agreement"] = len(agreeing)
 
     # ── refined_dependency_graph ─────────────────────────────────────────────
     merged_dep_graph: dict[str, list] = {}
