@@ -67,3 +67,4 @@ temp/
 scripts/
 
 data/checkpoints.db
+*.sqlite
