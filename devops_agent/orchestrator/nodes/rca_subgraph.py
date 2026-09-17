@@ -44,6 +44,7 @@ class RCAState(InvestigationState):
     rca_hypothesis_calls: dict[str, int]
     rca_hypothesis_scores: dict[str, list[float]]
     rca_completed: bool
+    rca_turn_count: int  # P0-3: how many times rca_llm_node has been called on this branch
 
 def _global_stopping_condition_met(scores: dict[str, float], surviving: list[str]) -> bool:
     if not scores:
@@ -95,6 +96,8 @@ async def rca_llm_node(state: RCAState, config: RunnableConfig) -> dict[str, Any
 
     messages = state.get("rca_messages", [])
     is_first_turn = not messages
+    # Track how many times the LLM has been called on this branch (P0-3)
+    rca_turn_count: int = state.get("rca_turn_count", 0)
     if is_first_turn:
         bundle = agent.construct_prompt_bundle(state)
         target_component = state.get("rca_target_component", "ALL")
@@ -125,11 +128,24 @@ Workflow for querying metrics:
   1. You MUST call list_available_metrics_for_component FIRST to get the exact valid names.
   2. Only then call query_metrics_for_hypothesis with the exact name.
 
+CRITICAL CONSTRAINT: EVIDENCE IDs
+--------
+Every tool call (query_metrics_for_hypothesis, query_logs_for_hypothesis) returns a structured result
+containing an `evidence_id` field (e.g., "ev_metric_Redis01_cpu_usage").
+When you submit EvidenceItem entries inside SubmitEvidenceReport, you MUST copy the exact
+`evidence_id` string from the tool response into the `evidence_id` field of the EvidenceItem.
+Do NOT invent or paraphrase evidence IDs. Only IDs that match a real tool result will be accepted.
+
 CONSTRAINTS & RULES
 --------
 1. NO HALLUCINATION: Never assume a column exists if it is not explicitly listed.
 2. NO NUMERICAL SCORING: You must ONLY classify evidence directionally (e.g. strongly_supports, neutral, weakly_contradicts). Do NOT attempt to calculate probabilities.
-3. When finished, you MUST call SubmitEvidenceReport."""
+3. SELF-ASSESSED CONFIDENCE: When you submit SubmitEvidenceReport, you MUST set `confidence_level` to your own honest assessment of the root_cause_candidate, using these criteria:
+   - HIGH: Strong, corroborated, unambiguous evidence with a confirmed causal chain to the root cause.
+   - MEDIUM: A plausible root cause with some evidentiary gaps or unverified links in the causal chain.
+   - LOW: Weak or thin evidence; the root cause candidate is a guess more than a finding.
+   - INCONCLUSIVE: The evidence gathered does not distinguish between the surviving hypotheses.
+4. When finished, you MUST call SubmitEvidenceReport."""
         messages = [
             SystemMessage(content=rca_system_prompt),
             HumanMessage(
@@ -153,10 +169,17 @@ CONSTRAINTS & RULES
                 )
             )
 
-    if not is_first_turn:
-        has_counterfactual = any("Assume your current leading hypothesis is WRONG" in getattr(m, "content", "") for m in messages)
-        if len(messages) >= 10 and not has_counterfactual:
-            messages.append(HumanMessage(content="Assume your current leading hypothesis is WRONG. What evidence would disprove it? Query for that evidence now."))
+    # P1-3: Inject counterfactual prompt at RCA agent turn 5 (not based on raw message count)
+    # rca_turn_count starts at 0 on the first call, so turn 5 = rca_turn_count == 4
+    if not is_first_turn and rca_turn_count == 4:
+        has_counterfactual = any(
+            "Assume your current leading hypothesis is WRONG" in getattr(m, "content", "")
+            for m in messages
+        )
+        if not has_counterfactual:
+            messages = list(messages) + [HumanMessage(
+                content="Assume your current leading hypothesis is WRONG. What evidence would disprove it? Query for that evidence now."
+            )]
 
     registry = get_registry()
     executor = ToolExecutor(registry)
@@ -202,9 +225,10 @@ CONSTRAINTS & RULES
     # Rule: first turn returns the full initial conversation (system + human +
     # response) so those messages are persisted into state. Every subsequent
     # turn returns only [response] — operator.add handles the append.
+    new_turn_count = rca_turn_count + 1
     if is_first_turn:
-        return {"rca_messages": messages + [response]}
-    return {"rca_messages": [response]}
+        return {"rca_messages": messages + [response], "rca_turn_count": new_turn_count}
+    return {"rca_messages": [response], "rca_turn_count": new_turn_count}
 
 async def rca_tools_node(state: RCAState, config: RunnableConfig) -> dict[str, Any]:
     messages = state.get("rca_messages", [])
@@ -283,6 +307,11 @@ async def rca_tools_node(state: RCAState, config: RunnableConfig) -> dict[str, A
                     evidence_dicts.append(item.dict())
                 elif isinstance(item, dict):
                     evidence_dicts.append(item)
+            # Stamp branch identity server-side so downstream merge/scoring/critic
+            # steps can attribute evidence back to its originating branch without
+            # trusting the LLM to self-report its own bookkeeping metadata.
+            for ev in evidence_dicts:
+                ev["branch_id"] = branch_id
             parsed["evidence_items"] = evidence_dicts
             # Write to branch accumulator instead of clobbering shared state
             branch_result = {

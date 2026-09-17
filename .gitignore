@@ -66,4 +66,4 @@ temp/
 
 scripts/
 
-data/
+data/checkpoints.db

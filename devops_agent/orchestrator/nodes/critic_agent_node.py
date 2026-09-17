@@ -7,7 +7,7 @@ from langchain_core.runnables import RunnableConfig
 from pydantic import BaseModel, Field
 
 from devops_agent.core.llm_provider import LLMFactory
-from devops_agent.orchestrator.state import InvestigationState
+from devops_agent.orchestrator.state import GLOBAL_FEEDBACK_KEY, InvestigationState
 from ..agents.critic_agent import CriticAgent
 from ..agents.schemas import CriticVerdict
 
@@ -78,28 +78,43 @@ CONSTRAINTS & RULES
                 if verdicts and not isinstance(verdicts[0], dict):
                     verdicts = [v.model_dump() if hasattr(v, "model_dump") else v.dict() for v in verdicts]
                     
-                # Generate feedback message for RCA agent
-                critique_lines = []
+                # Generate feedback message for RCA agent, attributed back to the
+                # branch that produced each rejected evidence item. Anything whose
+                # evidence_item_id doesn't resolve to a branch (e.g. a hallucinated
+                # or mangled ID) falls into the global bucket rather than being
+                # dropped, matching today's broadcast-to-all worst case.
+                evidence_id_to_branch = {
+                    item.get("evidence_id"): item.get("branch_id") or GLOBAL_FEEDBACK_KEY
+                    for item in mismatched_items
+                }
+                critique_lines_by_branch: dict[str, list[str]] = {}
                 for v in verdicts:
                     if v.get("verdict") == "reject_with_critique":
-                        critique_lines.append(f"Evidence ID {v.get('evidence_item_id')}: {v.get('rationale')}")
-                        
+                        eid = v.get("evidence_item_id")
+                        branch = evidence_id_to_branch.get(eid, GLOBAL_FEEDBACK_KEY)
+                        critique_lines_by_branch.setdefault(branch, []).append(
+                            f"Evidence ID {eid}: {v.get('rationale')}"
+                        )
+
                 updates = {
                     "critic_verdicts": verdicts,
                     "current_node": "critic",
                     "rca_completed": False,
                 }
 
-                if critique_lines:
+                if critique_lines_by_branch:
                     # Write to a top-level field so the feedback survives the next
                     # rca fan-out dispatch. rca_messages is branch-local and gets
                     # reset on each Send — writing directly to it here would be lost.
-                    feedback = (
-                        "CRITIC REJECTION: Your evidence report contained mathematical "
-                        "contradictions. Please re-evaluate the following items based on "
-                        "this feedback and submit a new report:\n"
-                        + "\n".join(critique_lines)
-                    )
+                    feedback = {
+                        branch: (
+                            "CRITIC REJECTION: Your evidence report contained mathematical "
+                            "contradictions. Please re-evaluate the following items based on "
+                            "this feedback and submit a new report:\n"
+                            + "\n".join(lines)
+                        )
+                        for branch, lines in critique_lines_by_branch.items()
+                    }
                     updates["critic_feedback_for_rca"] = feedback
 
                 return updates

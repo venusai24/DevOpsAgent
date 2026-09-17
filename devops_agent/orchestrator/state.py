@@ -8,6 +8,25 @@ from langchain_core.messages import AnyMessage
 
 _T = TypeVar("_T")
 
+# Sentinel bucket key for critic feedback that cannot be attributed to a
+# specific RCA branch (e.g. a topological-mismatch marker with no backing
+# evidence_id). dispatch_rca_fan_out broadcasts this bucket to every branch.
+GLOBAL_FEEDBACK_KEY: str = "__global__"
+
+
+def _reset_or_extend(current: list, incoming: list) -> list:
+    """Reducer for per_branch_rca_results.
+
+    - Empty list ``[]`` is treated as a reset signal — the accumulator is
+      cleared.  This lets a pre-dispatch node wipe stale branch results before
+      a re-dispatch without needing to change the field's Annotated type.
+    - Non-empty list is appended, exactly like ``operator.add``, so concurrent
+      fan-out branches can still accumulate their results safely.
+    """
+    if not incoming:          # reset sentinel
+        return []
+    return current + incoming
+
 def _keep_last(a: _T, b: _T) -> _T:  # noqa: ARG001
     """Reducer that always keeps the most recent (last-writer-wins) value.
 
@@ -120,10 +139,17 @@ class InvestigationState(TypedDict, total=False):
     current_evidence_items_to_review: Annotated[list[dict[str, Any]], _keep_last]
     # Fan-out accumulator: each parallel RCA branch appends its result dict here.
     # The operator.add reducer ensures branches never clobber each other.
-    per_branch_rca_results: Annotated[list[dict[str, Any]], operator.add]
-    # Top-level critic feedback injected into every new RCA branch on re-dispatch.
-    # Written by critic_agent_node; consumed by rca_dispatch_node.
-    critic_feedback_for_rca: str | None
+    per_branch_rca_results: Annotated[list[dict[str, Any]], _reset_or_extend]
+    # Critic feedback keyed by rca_branch_id (== component name), plus the
+    # reserved GLOBAL_FEEDBACK_KEY bucket for feedback that can't be tied to
+    # any single branch's evidence. Written by critic_agent_node and the
+    # deterministic auto-correction path in orchestration_nodes.py; resolved
+    # per-branch by dispatch_rca_fan_out at Send-construction time, so every
+    # branch only ever sees its own feedback (+ the global bucket) as a plain
+    # string when rca_llm_node reads it. May also be a legacy plain `str`
+    # persisted by a checkpoint from before this field became a dict — the
+    # resolver in rca_dispatch_node.py must broadcast that case unchanged.
+    critic_feedback_for_rca: dict[str, str] | str | None
     
     # Cross-cutting
     investigation_state: Annotated[Literal["active", "AMBIGUOUS_PRE_EVIDENCE", "AMBIGUOUS", "INCONCLUSIVE", "complete"], _keep_last]

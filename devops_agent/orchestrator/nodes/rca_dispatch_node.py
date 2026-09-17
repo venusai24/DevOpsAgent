@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from langgraph.types import Send
 
-from ..state import InvestigationState
+from ..state import GLOBAL_FEEDBACK_KEY, InvestigationState
 
 # Keys that must NOT be written back by parallel branches — they are singleton
 # (no Annotated reducer) and writing them from multiple concurrent branches
@@ -64,6 +64,34 @@ PER_BRANCH_TOTAL_BUDGET: int = 30  # Max tool invocations per branch
 PER_BRANCH_HYP_BUDGET: int = 10     # Max tool invocations per hypothesis per branch
 
 
+def _resolve_branch_feedback(
+    critic_feedback: dict[str, str] | str | None,
+    branch_id: str,
+) -> str | None:
+    """Resolve top-level critic_feedback_for_rca to a single branch's view of it.
+
+    Handles three shapes:
+      - None: no feedback yet.
+      - str: a legacy value persisted by a checkpoint from before this field
+        became a dict (a real investigation can pause at a HITL node and
+        resume after a deploy). Broadcast unchanged, matching prior behaviour.
+      - dict: combine this branch's own bucket with the GLOBAL_FEEDBACK_KEY
+        bucket (unattributable feedback, e.g. a topological mismatch with no
+        backing evidence_id), so nothing is silently lost.
+    """
+    if critic_feedback is None:
+        return None
+    if isinstance(critic_feedback, str):
+        return critic_feedback
+
+    parts = [
+        critic_feedback[key]
+        for key in (branch_id, GLOBAL_FEEDBACK_KEY)
+        if critic_feedback.get(key)
+    ]
+    return "\n\n".join(parts) if parts else None
+
+
 def dispatch_rca_fan_out(state: InvestigationState) -> list[Send]:
     """Return one Send per affected component, each with isolated branch state.
 
@@ -73,17 +101,16 @@ def dispatch_rca_fan_out(state: InvestigationState) -> list[Send]:
     """
     candidates: list[str] = state.get("affected_component_candidates", [])
 
-    # Build critic feedback prefix if the critic has flagged issues from a
-    # previous RCA pass (i.e. the graph looped through critic → rca again).
-    critic_feedback: str | None = state.get("critic_feedback_for_rca")
+    # Critic feedback (or the deterministic auto-correction path's equivalent)
+    # from a previous RCA pass, keyed by branch_id + a global fallback bucket.
+    # Resolved per-branch below so each Send only ever sees a plain str|None —
+    # rca_llm_node is unaware this was ever a dict.
+    critic_feedback: dict[str, str] | str | None = state.get("critic_feedback_for_rca")
 
-    # Clear per_branch_rca_results so the merge node starts fresh on re-dispatch.
-    # We must explicitly zero this out; reducers only append, never reset.
     # Build the base state that is passed INTO each branch.
     # We pass the full state so branches can read everything they need.
     # However, we track which keys are safe to receive BACK from branches.
     base_state = dict(state)
-    base_state["per_branch_rca_results"] = []
 
     if not candidates:
         # ── Fallback: single un-scoped branch (original behaviour) ──────────
@@ -102,6 +129,9 @@ def dispatch_rca_fan_out(state: InvestigationState) -> list[Send]:
                     "rca_hypothesis_calls": {},
                     "rca_messages": [],   # Always start empty; rca_llm_node builds the full initial prompt
                     "rca_completed": False,
+                    # Unconditional override — must replace whatever **base_state
+                    # contributed, never merely supplement it (see resolver docstring).
+                    "critic_feedback_for_rca": _resolve_branch_feedback(critic_feedback, "ALL"),
                 },
             )
         ]
@@ -123,6 +153,9 @@ def dispatch_rca_fan_out(state: InvestigationState) -> list[Send]:
                 "rca_hypothesis_calls": {},
                 "rca_messages": [],   # Always start empty; rca_llm_node builds the full initial prompt
                 "rca_completed": False,
+                # Unconditional override — must replace whatever **base_state
+                # contributed, never merely supplement it (see resolver docstring).
+                "critic_feedback_for_rca": _resolve_branch_feedback(critic_feedback, component),
             },
         )
         for component in candidates

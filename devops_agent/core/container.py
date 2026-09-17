@@ -1,9 +1,12 @@
 """Dependency Injection Container and Application Wiring."""
 
 import logging
+import os
 from typing import Optional
 
-from langgraph.checkpoint.memory import MemorySaver
+import sqlite3
+
+from langgraph.checkpoint.sqlite import SqliteSaver
 
 from ..orchestrator.graph import build_investigation_graph
 from ..state.config import PersistenceConfig
@@ -43,8 +46,11 @@ class AppContainer:
         self.tool_executor = ToolExecutor(self.tool_registry)
         
         # 6. Orchestration Graph
-        # A checkpointer is required for LangGraph to support breakpoints (interrupt_before).
-        self.checkpointer = MemorySaver()
+        # SqliteSaver persists checkpoints to disk so investigations can be
+        # resumed across process restarts by re-using the same INVESTIGATION_ID.
+        db_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "checkpoints.db")
+        conn = sqlite3.connect(db_path, check_same_thread=False)
+        self.checkpointer = SqliteSaver(conn)
         self.graph = build_investigation_graph(checkpointer=self.checkpointer)
 
     @classmethod

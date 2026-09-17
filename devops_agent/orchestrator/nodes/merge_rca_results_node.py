@@ -282,9 +282,12 @@ def _deduplicate_pairs(
 
 
 def _worst_case_investigation_state(branches: list[dict]) -> str:
+    """Worst-case investigation state, ignoring branches that produced no evidence."""
+    active_branches = [b for b in branches if b.get("evidence_items") or b.get("narrative_summary")]
+    pool = active_branches if active_branches else branches  # fallback to all if none investigated
     worst = "active"
     worst_rank = _INV_STATE_RANK.get("active", 3)
-    for b in branches:
+    for b in pool:
         state_val = b.get("investigation_state", "active")
         rank = _INV_STATE_RANK.get(state_val, 3)
         if rank < worst_rank:
@@ -294,7 +297,18 @@ def _worst_case_investigation_state(branches: list[dict]) -> str:
 
 
 def _worst_case_confidence(branches: list[dict]) -> str | None:
-    confidence_vals = [b.get("confidence_level") for b in branches if b.get("confidence_level")]
+    """Worst-case confidence, ignoring branches that produced no evidence.
+
+    Branches with zero evidence items and an empty narrative are stub/uninvestigated
+    branches — their INCONCLUSIVE verdict carries no information and must not
+    drag down the confidence of branches that did real work.
+    """
+    active_branches = [
+        b for b in branches
+        if b.get("evidence_items") or b.get("narrative_summary")
+    ]
+    pool = active_branches if active_branches else branches  # fallback
+    confidence_vals = [b.get("confidence_level") for b in pool if b.get("confidence_level")]
     if not confidence_vals:
         return None
     return min(confidence_vals, key=lambda c: _CONFIDENCE_RANK.get(c, 3))

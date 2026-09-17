@@ -19,6 +19,7 @@ from .nodes.orchestration_nodes import (
     deduplication_node,
     duplicate_halt_node,
     report_delivery_node,
+    reset_rca_branches_node,
     save_stage0_artifacts_node,
     deterministic_scoring_node,
 )
@@ -58,8 +59,8 @@ def route_after_scoring(state: InvestigationState):
     if current == "deterministic_scoring_needs_critic":
         return "critic"
     elif current == "deterministic_scoring_needs_correction":
-        return dispatch_rca_fan_out(state)
-    
+        return "reset_rca_branches"   # → reset → fan-out
+
     inv_state = state.get("investigation_state")
     if inv_state == "AMBIGUOUS":
         return "hitl_ambiguous_evidence"
@@ -73,8 +74,7 @@ def route_after_hitl_resume(state: InvestigationState):
     if action == "RESTART_TRIAGE":
         return "triage"
     elif action == "RESTART_RCA":
-        # Re-fan-out with fresh branch states.
-        return dispatch_rca_fan_out(state)
+        return "reset_rca_branches"   # → reset → fan-out
     elif action == "RESTART_CONTEXT":
         return "context_assembly"
     elif action == "FORCE_CLOSE":
@@ -91,6 +91,7 @@ def build_investigation_graph(checkpointer: BaseCheckpointSaver = None):
     builder.add_node("triage", build_triage_subgraph())
     builder.add_node("rca", build_rca_subgraph())
     builder.add_node("merge_rca", merge_rca_results_node)
+    builder.add_node("reset_rca_branches", reset_rca_branches_node)
     builder.add_node("hitl_pre_evidence", hitl_pre_evidence_node)
     builder.add_node("hitl_ambiguous_evidence", hitl_ambiguous_evidence_node)
     builder.add_node("hitl_inconclusive", hitl_inconclusive_node)
@@ -120,15 +121,16 @@ def build_investigation_graph(checkpointer: BaseCheckpointSaver = None):
     builder.add_conditional_edges("triage", route_after_triage)
     builder.add_edge("rca", "merge_rca")
     builder.add_edge("merge_rca", "deterministic_scoring")
+    # critic and correction re-dispatch go through reset first, then fan-out
+    builder.add_conditional_edges("critic", dispatch_rca_fan_out)
+    builder.add_conditional_edges("reset_rca_branches", dispatch_rca_fan_out)
     builder.add_conditional_edges("deterministic_scoring", route_after_scoring, {
         "critic": "critic",
+        "reset_rca_branches": "reset_rca_branches",
         "report_delivery": "report_delivery",
         "hitl_ambiguous_evidence": "hitl_ambiguous_evidence",
         "hitl_inconclusive": "hitl_inconclusive",
     })
-    # critic re-routes through the fan-out dispatcher so critic feedback is
-    # injected into fresh branch states via critic_feedback_for_rca.
-    builder.add_conditional_edges("critic", dispatch_rca_fan_out)
     
     builder.add_edge("hitl_pre_evidence", "resume_after_hitl")
     builder.add_edge("hitl_ambiguous_evidence", "resume_after_hitl")

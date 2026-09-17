@@ -2,7 +2,19 @@
 
 from typing import Any
 
-from ..state import InvestigationState
+from ..state import GLOBAL_FEEDBACK_KEY, InvestigationState
+
+
+def reset_rca_branches_node(state: InvestigationState) -> dict[str, Any]:
+    """Clear the per_branch_rca_results accumulator before a re-dispatch.
+
+    ``per_branch_rca_results`` uses an append-only reducer so that concurrent
+    fan-out branches can accumulate safely.  The custom ``_reset_or_extend``
+    reducer treats an *empty* incoming list as a reset signal, so returning
+    ``{"per_branch_rca_results": []}`` here wipes the accumulator without
+    changing the field's Annotated type or touching any other state.
+    """
+    return {"per_branch_rca_results": []}
 
 
 def deduplication_node(state: InvestigationState) -> dict[str, Any]:
@@ -98,20 +110,48 @@ def deterministic_scoring_node(state: InvestigationState) -> dict[str, Any]:
             needs_correction = True
             
         verification_failures = state.get("verification_failures", 0)
-        
+
+        review_items = [item for item in evidence_items if item.get("evidence_id", item.get("raw_reference", {}).get("evidence_id")) in unreviewed_mismatches]
+
         updates = {
             "updated_hypothesis_scores": updated_scores,
             "mismatched_items": mismatched,
-            "current_evidence_items_to_review": [item for item in evidence_items if item.get("evidence_id", item.get("raw_reference", {}).get("evidence_id")) in unreviewed_mismatches]
+            "current_evidence_items_to_review": review_items
         }
-        
+
         if needs_correction:
-            if verification_failures == 0:
-                feedback = (
-                    "CRITIC REJECTION (Deterministic): The following evidence items contradicted "
-                    "the raw mathematical metrics, were temporally impossible, or topologically invalid. "
-                    "Please re-evaluate:\n" + "\n".join([f"- Evidence ID: {m}" for m in unreviewed_mismatches])
-                )
+            if verification_failures >= 3:
+                # P4-6: Max loop cap — persistent correction failure escalates to HITL
+                gaps = state.get("investigation_gaps", [])
+                gaps.append({
+                    "reason": f"Verification loop cap reached after {verification_failures} failures. Escalating to HITL.",
+                    "mismatched_items": unreviewed_mismatches,
+                })
+                updates["verification_failures"] = verification_failures + 1
+                updates["investigation_state"] = "AMBIGUOUS"
+                updates["investigation_gaps"] = gaps
+                updates["current_node"] = "deterministic_scoring_done"
+            elif verification_failures == 0:
+                # Attribute each unreviewed mismatch back to the branch that produced
+                # it; anything with no matching evidence dict (e.g. a synthetic
+                # topo_fail_* marker) falls into the global bucket, broadcast to
+                # every branch on re-dispatch.
+                evidence_id_to_branch = {
+                    item.get("evidence_id"): item.get("branch_id") or GLOBAL_FEEDBACK_KEY
+                    for item in review_items
+                }
+                feedback_by_branch: dict[str, list[str]] = {}
+                for m in unreviewed_mismatches:
+                    branch = evidence_id_to_branch.get(m, GLOBAL_FEEDBACK_KEY)
+                    feedback_by_branch.setdefault(branch, []).append(f"- Evidence ID: {m}")
+                feedback = {
+                    branch: (
+                        "CRITIC REJECTION (Deterministic): The following evidence items contradicted "
+                        "the raw mathematical metrics, were temporally impossible, or topologically invalid. "
+                        "Please re-evaluate:\n" + "\n".join(lines)
+                    )
+                    for branch, lines in feedback_by_branch.items()
+                }
                 updates["critic_feedback_for_rca"] = feedback
                 updates["verification_failures"] = 1
                 updates["current_node"] = "deterministic_scoring_needs_correction"

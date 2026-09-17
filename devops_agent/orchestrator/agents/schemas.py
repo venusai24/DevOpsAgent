@@ -48,6 +48,9 @@ class SubmitEvidenceReport(BaseModel):
     unconfirmed_links: list[dict[str, Any]] = Field(default_factory=list)
     final_report: dict[str, Any] | None = Field(default=None, description="Structured final report.")
     investigation_state: Literal["active", "AMBIGUOUS", "INCONCLUSIVE", "complete"] = "active"
+    confidence_level: Literal["HIGH", "MEDIUM", "LOW", "INCONCLUSIVE"] = Field(
+        description="Your own self-assessed confidence in the root_cause_candidate, per the criteria in the system prompt."
+    )
     investigation_gaps: list[dict[str, Any]] = Field(default_factory=list)
     current_node: str = "rca"
 

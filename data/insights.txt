@@ -1,0 +1,152 @@
+
+
+[01:43, 26/6/2026] Venu Sai: For each log type prepare a manual about the most common error patterns and what they imply
+
+If there are numbers extract from each row a number and find the pattern with logs of same family
+
+
+Fine tune an LLM for Pattern Finding in Logs
+
+User should tell for each  cmbd_id what it is database or what? What each cluster is?
+[01:47, 26/6/2026] Venu Sai: How to get insights from each kind of CSV file
+[01:50, 26/6/2026] Venu Sai: Diagnosis corpus for decision making of pattern to root cause
+[01:51, 26/6/2026] Venu Sai: CSV Agent Runbook for decision making about what CSV tool to call at what scenario.
+[01:52, 26/6/2026] Venu Sai: Tool and Runbook are scenario based. 
+CSV tool and Runbook for CSV during info collection and pattern collection 
+
+DIAGNOsis Runbook for Diagnosis phase for  Pattern to Root cause
+[01:53, 26/6/2026] Venu Sai: User should tell topology services present etc useful for knowing tha apps or clusters being used as well as services
+[01:55, 26/6/2026] Venu Sai: The ideal flow of Agent is collect as much information as possible related to the incident, like patterns, anomalies etc. and then using the patterns and anomalies find the root cause.
+[01:56, 26/6/2026] Venu Sai: Finding patterns and anomalies involves CSV Engine.
+
+Finding rc from patterns is Diagnosis and history also plays a part here.
+[01:57, 26/6/2026] Venu Sai: Also do timestamp based correlation between multiple csvs using a collection of LLMs and Tools
+
+This helps identify the chain of events
+
+Or helps reinforce the ideas
+
+Prompt Claude to know the mindset behind a SRE Engineer who would go through 4 CSV files. How does he correlate different things ? How does he find the different patterns. How does he find the different insights and patterns from Data.
+
+[02:14, 26/6/2026] Venu Sai: From Raw structured data in a specified format how does he form insights?
+[02:15, 26/6/2026] Venu Sai: Always ensure that when giving an LLM a task to do, when passing context, pass only context relevant to that situation to perform a task
+[02:15, 26/6/2026] Venu Sai: Make many LLM subtools
+[02:16, 26/6/2026] Venu Sai: Don't pass rubbish about Diagnosis information when the Agent is in CSV Engine phase
+
+These are few idea proposals which I have about my project
+(base) VenuSai@Venu-Vostro:~/DevOpsAgent/incident_data$ head -4 cluster_app_stats.csv  
+timestamp,rr,sr,cnt,mrt,tc
+1614852000,100.0,100.0,26,140.23,ServiceTest11
+1614852000,98.67,100.0,75,965.07,ServiceTest8
+1614852000,96.43,100.0,56,1490.11,ServiceTest3
+(base) VenuSai@Venu-Vostro:~/DevOpsAgent/incident_data$ head -4 cluster_incident_logs.csv
+log_id,timestamp,cmdb_id,log_name,value
+6bf49ad51b60012365a7804c06436d78,1614852004,Tomcat03,gc,"27259.704: [GC (Allocation Failure) 2021-03-04T18:00:04.044+0800: 27259.704: [ParNew: 848824K->8824K(943744K), 0.0635009 secs] 1711707K->871773K(4089472K), 0.0636613 secs] [Times: user=0.14 sys=0.00, real=0.06 secs] "
+38263afedd1cffb5fdac7ca48c450902,1614852206,Tomcat03,gc,"27461.720: [GC (Allocation Failure) 2021-03-04T18:03:26.060+0800: 27461.720: [ParNew: 847736K->10231K(943744K), 0.0863199 secs] 1710685K->873241K(4089472K), 0.0864841 secs] [Times: user=0.24 sys=0.00, real=0.09 secs] "
+c06c8dbfbb276f69d969ea10adf792ef,1614852420,Tomcat03,gc,"27676.650: [GC (Allocation Failure) 2021-03-04T18:07:00.990+0800: 27676.650: [ParNew: 849143K->10840K(943744K), 0.1034940 secs] 1712153K->873910K(4089472K), 0.1036550 secs] [Times: user=0.26 sys=0.01, real=0.11 secs] "
+(base) VenuSai@Venu-Vostro:~/DevOpsAgent/incident_data$ head -4 incident_traces.csv  redis02_metrics.csv
+==> incident_traces.csv <==
+timestamp,cmdb_id,parent_id,span_id,trace_id,duration
+1614852000351,MG01,369-bcou-st-c514cf36-81310@2220-2f0e47af1e-90566,21030400016222104580,gw0120210304180000446561,20
+1614852000351,MG01,21030400016222104580,369-bcou-dle-way1-c514cf30-43410@0824-2f0e47af1f-63800,gw0120210304180000446561,20
+1614852000110,IG02,21030400016222220700,21030400016222220700,gw0120210304180000446561,27
+
+==> redis02_metrics.csv <==
+timestamp,cmdb_id,kpi_name,value
+1614852000,Redis02,OSLinux-CPU_CPU_CPUSysTime,0.4539
+1614852000,Redis02,OSLinux-CPU_CPU_CPULoad,0.02
+1614852000,Redis02,OSLinux-OSLinux_FILESYSTEM_-home_FSInodeUsedPercent,0.2478
+
+Above is the CSV structures of my project
+
+
+Scanning log_service.csv to find unique log names and random samples...
+
+==================================================
+UNIQUE LOG NAMES AND RANDOM SAMPLES
+==================================================
+Unique log names found: ['apache_access_log', 'catalina', 'error', 'gc', 'localhost', 'localhost_access_log', 'slow']
+
+[apache_access_log] (3 random samples):
+--------------------------------------------------
+Sample 1:
+IPAddress "POST /UOCP/person/ServiceTest3.json HTTP/1.1" 200 230 "-" "k6/0.29.0 (api_url 17424 0
+
+Sample 2:
+IPAddress "POST /UOCP/person/ServiceTest5.json HTTP/1.1" 200 253 "-" "k6/0.29.0 (api_url 19281 0
+
+Sample 3:
+IPAddress "POST /UOCP/person/ServiceTest3.json HTTP/1.1" 200 230 "-" "k6/0.29.0 (api_url 15116 0
+--------------------------------------------------
+
+[catalina] (3 random samples):
+--------------------------------------------------
+Sample 1:
+SEVERE [http-nio-8003-Acceptor-0] org.apache.tomcat.util.net.NioEndpoint$Acceptor.run java.lang.OutOfMemoryError: Java heap space 
+
+Sample 2:
+SEVERE [http-nio-8003-Acceptor-0] org.apache.tomcat.util.net.NioEndpoint$Acceptor.run java.lang.OutOfMemoryError: Java heap space 
+
+Sample 3:
+SEVERE [http-nio-8003-exec-239] org.apache.tomcat.util.net.NioEndpoint$SocketProcessor.doRun java.lang.OutOfMemoryError: Java heap space
+--------------------------------------------------
+
+[error] (3 random samples):
+--------------------------------------------------
+Sample 1:
+0 [Note] InnoDB: page_cleaner: 1000ms intended loop took 5322ms. The settings might not be optimal. (flushed=97 and evicted=0, during the time.)
+
+Sample 2:
+0 [Note] InnoDB: page_cleaner: 1000ms intended loop took 4269ms. The settings might not be optimal. (flushed=70 and evicted=0, during the time.)
+
+Sample 3:
+0 [Note] InnoDB: page_cleaner: 1000ms intended loop took 9836ms. The settings might not be optimal. (flushed=4002 and evicted=0, during the time.)
+--------------------------------------------------
+
+[gc] (3 random samples):
+--------------------------------------------------
+Sample 1:
+202543.424: [Full GC (Allocation Failure) 2021-03-06T18:34:38.500+0800: 202543.424: [CMS: 3145727K->3145727K(3145728K), 1.4925650 secs] 4089471K->4089469K(4089472K), [Metaspace: 489080K->489080K(1521664K)], 1.4927485 secs] [Times: user=1.49 sys=0.00, real=1.49 secs] 
+
+Sample 2:
+177627.641: [GC (Allocation Failure) 2021-03-06T11:42:04.859+0800: 177627.641: [ParNew: 850478K->11578K(943744K), 0.0709758 secs] 1755655K->916825K(4089472K), 0.0711802 secs] [Times: user=0.18 sys=0.00, real=0.07 secs] 
+
+Sample 3:
+202563.132: [Full GC (Allocation Failure) 2021-03-06T18:34:58.208+0800: 202563.132: [CMS: 3145720K->3145720K(3145728K), 1.4563348 secs] 4089457K->4089447K(4089472K), [Metaspace: 489080K->489080K(1521664K)], 1.4564834 secs] [Times: user=1.45 sys=0.00, real=1.46 secs]
+--------------------------------------------------
+
+[localhost] (3 random samples):
+--------------------------------------------------
+Sample 1:
+SEVERE [2916] org.apache.catalina.core.StandardHostValve.invoke Exception Processing /UOCP/base/ServiceTest7.json java.lang.NullPointerException at org.apache.catalina.core.StandardWrapperValve.invoke(StandardWrapperValve.java:250) at org.apache.catalina.core.StandardContextValve.invoke(StandardContextValve.java:94) at org.apache.catalina.core.StandardHostValve.invoke(StandardHostValve.java:141) at org.apache.catalina.valves.ErrorReportValve.invoke(ErrorReportValve.java:79) at org.apache.catalina.valves.AbstractAccessLogValve.invoke(AbstractAccessLogValve.java:620) at org.apache.catalina.core.StandardEngineValve.invoke(StandardEngineValve.java:88) at org.apache.catalina.connector.CoyoteAdapter.service(CoyoteAdapter.java:502) at org.apache.coyote.http11.AbstractHttp11Processor.process(AbstractHttp11Processor.java:1132) at org.apache.coyote.AbstractProtocol$AbstractConnectionHandler.process(AbstractProtocol.java:684) at org.apache.tomcat.util.net.NioEndpoint$SocketProcessor.doRun(NioEndpoint.java:1539) at org.apache.tomcat.util.net.NioEndpoint$SocketProcessor.run(NioEndpoint.java:1495) at java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1149) at java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:624) at org.apache.tomcat.util.threads.TaskThread$WrappingRunnable.run(TaskThread.java:61) at java.lang.Thread.run(Thread.java:748)
+
+Sample 2:
+SEVERE [2662] org.apache.catalina.core.StandardHostValve.invoke Exception Processing /UOCP/base/ServiceTest11.json java.lang.NullPointerException at org.apache.catalina.core.StandardWrapperValve.invoke(StandardWrapperValve.java:250) at org.apache.catalina.core.StandardContextValve.invoke(StandardContextValve.java:94) at org.apache.catalina.core.StandardHostValve.invoke(StandardHostValve.java:141) at org.apache.catalina.valves.ErrorReportValve.invoke(ErrorReportValve.java:79) at org.apache.catalina.valves.AbstractAccessLogValve.invoke(AbstractAccessLogValve.java:620) at org.apache.catalina.core.StandardEngineValve.invoke(StandardEngineValve.java:88) at org.apache.catalina.connector.CoyoteAdapter.service(CoyoteAdapter.java:502) at org.apache.coyote.http11.AbstractHttp11Processor.process(AbstractHttp11Processor.java:1132) at org.apache.coyote.AbstractProtocol$AbstractConnectionHandler.process(AbstractProtocol.java:684) at org.apache.tomcat.util.net.NioEndpoint$SocketProcessor.doRun(NioEndpoint.java:1539) at org.apache.tomcat.util.net.NioEndpoint$SocketProcessor.run(NioEndpoint.java:1495) at java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1149) at java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:624) at org.apache.tomcat.util.threads.TaskThread$WrappingRunnable.run(TaskThread.java:61) at java.lang.Thread.run(Thread.java:748)
+
+Sample 3:
+SEVERE [2966] org.apache.catalina.core.StandardHostValve.invoke Exception Processing /UOCP/person/ServiceTest10.json java.lang.NullPointerException at org.apache.catalina.core.StandardWrapperValve.invoke(StandardWrapperValve.java:250) at org.apache.catalina.core.StandardContextValve.invoke(StandardContextValve.java:94) at org.apache.catalina.core.StandardHostValve.invoke(StandardHostValve.java:141) at org.apache.catalina.valves.ErrorReportValve.invoke(ErrorReportValve.java:79) at org.apache.catalina.valves.AbstractAccessLogValve.invoke(AbstractAccessLogValve.java:620) at org.apache.catalina.core.StandardEngineValve.invoke(StandardEngineValve.java:88) at org.apache.catalina.connector.CoyoteAdapter.service(CoyoteAdapter.java:502) at org.apache.coyote.http11.AbstractHttp11Processor.process(AbstractHttp11Processor.java:1132) at org.apache.coyote.AbstractProtocol$AbstractConnectionHandler.process(AbstractProtocol.java:684) at org.apache.tomcat.util.net.NioEndpoint$SocketProcessor.doRun(NioEndpoint.java:1539) at org.apache.tomcat.util.net.NioEndpoint$SocketProcessor.run(NioEndpoint.java:1495) at java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1149) at java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:624) at org.apache.tomcat.util.threads.TaskThread$WrappingRunnable.run(TaskThread.java:61) at java.lang.Thread.run(Thread.java:748)
+--------------------------------------------------
+
+[localhost_access_log] (3 random samples):
+--------------------------------------------------
+Sample 1:
+IG02 POST /UOCP/base/ServiceTest7.json HTTP/1.1 200 1403 - k6/0.29.0 (api_url 104 0.104
+
+Sample 2:
+IG02 POST /UOCP/base/ServiceTest4.json HTTP/1.1 200 140 - k6/0.29.0 (api_url 3198 3.198
+
+Sample 3:
+IG01 POST /UOCP/person/ServiceTest1.json HTTP/1.1 200 93 - k6/0.29.0 (api_url 23 0.023
+--------------------------------------------------
+
+[slow] (3 random samples):
+--------------------------------------------------
+Sample 1:
+# User@Host: OperName[OperName] @  [IPAddress]  Id: 834158 # Query_time: 0.194852  Lock_time: 0.000082 Rows_sent: 0  Rows_examined: 0 SET timestamp=1615045740; INSERT INTO TableName ( Fields ) VALUES ( Values ); 
+
+Sample 2:
+# User@Host: OperName[OperName] @  [Tomcat03]  Id: 1326191 # Query_time: 0.216904  Lock_time: 0.000000 Rows_sent: 0  Rows_examined: 0 SET timestamp=1615005155; commit; 
+
+Sample 3:
+# User@Host: OperName[OperName] @  [Tomcat04]  Id: 1326254 # Query_time: 0.507984  Lock_time: 0.000064 Rows_sent: 1  Rows_examined: 1 SET timestamp=1615012630; SELECT Fields FROM TableName [WHERE WhereClause] [LIMIT N] [OFFSET M];
+--------------------------------------------------

@@ -186,15 +186,6 @@ async def context_assembler_agent_node(state: InvestigationState, config: Runnab
     parsed = service.assemble(state, cmdb_ids, tc_values)
     parsed["baseline_registry_ref"] = baseline_ref
 
-    # Build a flat component_kpi_map: cmdb_id -> list[exact metric names]
-    # This is the authoritative metric registry for the RCA LLM — it must
-    # use only names from this map when calling query_metrics_for_hypothesis.
-    parsed["component_kpi_map"] = {
-        cid: info["available_metrics"]
-        for cid, info in kpi_map.items()
-        if "available_metrics" in info
-    }
-
     if dependencies_unknown and 'discovered_topology' in locals():
         parsed["discovered_topology_graph"] = discovered_topology
 
