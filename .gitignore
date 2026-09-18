@@ -3,8 +3,10 @@
 # Ignore all markdown files
 *.md
 
-# Except README.md
+# Except README.md, CLAUDE.md, and subagent definitions under .claude/
 !README.md
+!CLAUDE.md
+!.claude/**/*.md
 Rules.txt
 Definitive Reliability-First Cognitive Architecture for Incident Response.md:Zone.Identifier
 
